@@ -134,3 +134,39 @@ func _instantiate_offscreen() -> Node:
 	var instance: Node = script.new()
 	_parent.add_child(instance)
 	return instance
+
+
+# lm.java places every pivot at model row 15 in a Y-DOWN space where row
+# 24 is the feet (ec.java:48-50), i.e. 0.5625 m up. Reading the row as
+# 0.9375 m floated the body out of the top of its own hitbox and hung
+# the leg tips 0.23 m in the air (issue #7 "floating spiders").
+func _mesh_y_extent(root: Node) -> Vector2:
+	var lo: float = INF
+	var hi: float = -INF
+	var stack: Array[Node] = [root]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		for child: Node in node.get_children():
+			stack.append(child)
+		if not node is MeshInstance3D or (node as MeshInstance3D).mesh == null:
+			continue
+		var mi := node as MeshInstance3D
+		var aabb: AABB = mi.mesh.get_aabb()
+		for i: int in range(8):
+			var corner: Vector3 = mi.global_transform * aabb.get_endpoint(i)
+			lo = minf(lo, corner.y)
+			hi = maxf(hi, corner.y)
+	return Vector2(lo, hi)
+
+
+func test_model_sits_inside_the_hitbox_with_feet_on_the_floor() -> void:
+	var spider: Node3D = _instantiate_offscreen() as Node3D
+	spider.global_position = Vector3.ZERO
+	var extent: Vector2 = _mesh_y_extent(spider)
+	gut.p("spider mesh y extent: %s" % str(extent))
+	# Body cubes: row 15 ± 4 px → 0.3125 .. 0.8125 above the feet.
+	assert_lt(extent.y, 0.9 + 0.001, "nothing pokes out of the 0.9 m box")
+	# Leg tips: 16 px legs from a 9 px pivot, dropped by cos(yaw)·sin(roll)
+	# under vanilla's roll-outer order, land about a pixel above the floor.
+	assert_gt(extent.x, -0.03, "no leg stabs through the floor")
+	assert_lt(extent.x, 0.13, "leg tips reach the floor rather than hovering")

@@ -111,6 +111,12 @@ func bind(inv: Inventory) -> void:
 func open_at(pos: Vector3i) -> void:
 	_furnace_pos = pos
 	_has_furnace = true
+	# Materialise the tile-entity state NOW. Interaction only reaches
+	# here after hitting a furnace block, which is the manager's caller
+	# contract. Without this, _refresh's has_furnace gate skipped the
+	# progress-bar update on a never-clicked furnace, so nothing hid the
+	# indicators until the first slot click created the state.
+	FurnaceManager.get_or_create(pos)
 	visible = true
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_refresh()
@@ -208,30 +214,42 @@ func _build_panel() -> void:
 	# pixel-by-pixel rather than a solid colored block.
 	var sheet: Texture2D = load(FURNACE_TEXTURE_PATH) as Texture2D
 
+	# Both indicators start HIDDEN with a 1-px placeholder region and
+	# EXPAND_IGNORE_SIZE. An AtlasTexture whose region has a zero width
+	# or height is read by Godot as "the whole sheet", and a TextureRect
+	# in the default EXPAND_KEEP_SIZE mode grows its minimum size to
+	# match — so the old zero-sized, visible-by-default construction drew
+	# the entire 256-px column of gui art, stretched, until the first
+	# progress update shrank it (issue #7: "lit up ui stretched when
+	# first entering").
 	_arrow_atlas = AtlasTexture.new()
 	_arrow_atlas.atlas = sheet
-	_arrow_atlas.region = Rect2(176, 14, 0, _ARROW_SIZE.y)
+	_arrow_atlas.region = Rect2(176, 14, 1, _ARROW_SIZE.y)
 	_arrow_fill = TextureRect.new()
 	_arrow_fill.texture = _arrow_atlas
+	_arrow_fill.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	_arrow_fill.stretch_mode = TextureRect.STRETCH_SCALE
 	_arrow_fill.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	_arrow_fill.position = Vector2(_ARROW_POS.x * SCALE, _ARROW_POS.y * SCALE)
 	_arrow_fill.size = Vector2(0, _ARROW_SIZE.y * SCALE)
 	_arrow_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_arrow_fill.visible = false
 	_root.add_child(_arrow_fill)
 
 	_flame_atlas = AtlasTexture.new()
 	_flame_atlas.atlas = sheet
 	# Default region — overwritten per-frame; height grows from the bottom
 	# as fuel depletes (0 burn → empty; full burn → full 14×14 sliver).
-	_flame_atlas.region = Rect2(176, _FLAME_SIZE.y, _FLAME_SIZE.x, 0)
+	_flame_atlas.region = Rect2(176, _FLAME_SIZE.y - 1, _FLAME_SIZE.x, 1)
 	_flame_fill = TextureRect.new()
 	_flame_fill.texture = _flame_atlas
+	_flame_fill.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	_flame_fill.stretch_mode = TextureRect.STRETCH_SCALE
 	_flame_fill.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	_flame_fill.position = Vector2(_FLAME_POS.x * SCALE, (_FLAME_POS.y + _FLAME_SIZE.y) * SCALE)
 	_flame_fill.size = Vector2(_FLAME_SIZE.x * SCALE, 0)
 	_flame_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_flame_fill.visible = false
 	_root.add_child(_flame_fill)
 
 
@@ -403,6 +421,9 @@ func _refresh() -> void:
 		_paint_slot(_local_node_for[SLOT_INPUT] as Panel, ItemStack.new())
 		_paint_slot(_local_node_for[SLOT_FUEL] as Panel, ItemStack.new())
 		_paint_slot(_local_node_for[SLOT_OUTPUT] as Panel, ItemStack.new())
+		# No state means nothing is burning or cooking.
+		_arrow_fill.visible = false
+		_flame_fill.visible = false
 	_refresh_cursor_overlay()
 
 

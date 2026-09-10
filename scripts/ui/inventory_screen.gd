@@ -60,11 +60,9 @@ var _font: FontFile
 var _tooltip: Label
 
 # Drag state — see _on_mouse_down/up below.
-var _drag_active: bool = false
-var _drag_button: int = -1
-var _drag_slots: Array = []
-var _drag_starting_count: int = 0
-var _drag_starting_id: int = 0
+# Press-time click + live sweep state machine, shared with the crafting
+# table and chest screens. See slot_drag.gd.
+var _drag := SlotDrag.new()
 
 # Unified pointer position — the last mouse OR touch location. Phones
 # only move the DOM-level mouse at tap moments, so anything reading
@@ -87,6 +85,14 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_cursor = ItemStack.new()
+	_drag.none_id = -1
+	_drag.cursor = _cursor
+	_drag.stack_at = func(slot: int) -> ItemStack:
+		return inventory.slots[slot] if inventory != null and slot >= 0 else null
+	_drag.sweep_excluded = _sweep_excluded
+	_drag.click_left = _handle_left_click
+	_drag.click_right = _handle_right_click
+	_drag.changed = _sweep_changed
 	_font = MinecraftFont.get_font()
 	_build_dim_background()
 	_build_panel()
@@ -194,6 +200,7 @@ func _build_panel() -> void:
 	var preview := CharacterPreview.new()
 	preview.position = Vector2(27 * SCALE, 8 * SCALE)
 	preview.size = Vector2(50 * SCALE, 70 * SCALE)
+	preview.gui_scale = float(SCALE)
 	root.add_child(preview)
 
 	# Click-target slots overlaid on the baked texture.
@@ -390,7 +397,7 @@ func _input(event: InputEvent) -> void:
 			# mouse still reaches real Controls (the close button) through
 			# the GUI layer, but must not double-drive the slot handlers.
 			return
-	if event.is_action_pressed("drop_selected") and not _drag_active:
+	if event.is_action_pressed("drop_selected") and not _drag.active:
 		# Vanilla GuiContainer.drop: Q while inventory is open drops from
 		# the cursor (if non-empty) OR the hovered slot. Ctrl modifier
 		# drops the whole stack, otherwise one item.
@@ -421,7 +428,7 @@ func _input(event: InputEvent) -> void:
 			_on_mouse_down(event.button_index, slot)
 		else:
 			_on_mouse_up(event.button_index, slot)
-	elif event is InputEventMouseMotion and _drag_active:
+	elif event is InputEventMouseMotion and _drag.active:
 		_track_drag_motion()
 
 
@@ -495,121 +502,27 @@ func _slot_under_mouse() -> int:
 
 
 func _on_mouse_down(button: int, slot: int) -> void:
-	if button != MOUSE_BUTTON_LEFT and button != MOUSE_BUTTON_RIGHT:
-		return
-	if slot < 0:
-		return
-	# Three press-time modes:
-	#   • Cursor non-empty + normal slot → DISTRIBUTE drag (sweep across slots
-	#     to split-even on LMB or one-each on RMB) — vanilla MC.
-	#   • Cursor empty + slot has items + LMB → MOVE drag: pick up the stack
-	#     immediately so it follows the mouse, then drop wherever the user
-	#     releases. Lets you literally click-and-drag stacks across slots.
-	#   • Anything else → wait for release, treat as a click.
-	if not _cursor.is_empty() and slot != Inventory.CRAFT_RESULT:
-		_drag_active = true
-		_drag_button = button
-		_drag_slots = [slot]
-		_drag_starting_count = _cursor.count
-		_drag_starting_id = _cursor.item_id
-		return
-	if (
-		button == MOUSE_BUTTON_LEFT
-		and _cursor.is_empty()
-		and slot != Inventory.CRAFT_RESULT
-		and not inventory.slots[slot].is_empty()
-	):
-		# Pick up immediately on press → cursor follows mouse → release drops.
-		_handle_left_click(slot)
-		_drag_active = false  # no distribution on release; just a normal drop
-		_drag_button = button
-		_drag_slots = [slot]
-		return
-	# Click-only mode: actual handling fires on release.
-	_drag_active = false
-	_drag_button = button
-	_drag_slots = [slot]
+	_drag.press(button, slot)
 
 
 func _on_mouse_up(button: int, slot: int) -> void:
-	if button != _drag_button:
-		return
-	if _drag_active and _drag_slots.size() > 1:
-		_apply_drag_distribution()
-	else:
-		# Single-slot interaction or move-drag drop. The release slot wins
-		# unless the cursor is hovering off a slot, in which case the press
-		# slot is used as fallback.
-		var click_slot: int = slot if slot >= 0 else _drag_slots[0]
-		if click_slot >= 0 and click_slot != _drag_slots[0]:
-			# Drag-moved to a different slot → drop on release target.
-			if button == MOUSE_BUTTON_LEFT:
-				_handle_left_click(click_slot)
-			elif button == MOUSE_BUTTON_RIGHT:
-				_handle_right_click(click_slot)
-		elif click_slot >= 0 and not _was_press_pickup():
-			# Same-slot click without an immediate pickup — fire normal handler.
-			if button == MOUSE_BUTTON_LEFT:
-				_handle_left_click(click_slot)
-			elif button == MOUSE_BUTTON_RIGHT:
-				_handle_right_click(click_slot)
-	_drag_active = false
-	_drag_button = -1
-	_drag_slots.clear()
-
-
-func _was_press_pickup() -> bool:
-	# True if _on_mouse_down already picked up the stack (move-drag mode)
-	# and we should NOT re-fire the click handler on release.
-	return (
-		_drag_button == MOUSE_BUTTON_LEFT
-		and not _drag_active
-		and _drag_slots.size() == 1
-		and not _cursor.is_empty()
-		and inventory.slots[_drag_slots[0]].is_empty()
-	)
+	_drag.release(button, slot)
 
 
 func _track_drag_motion() -> void:
-	var hovered: int = _slot_under_mouse()
-	if hovered < 0 or _drag_slots.has(hovered):
-		return
-	if hovered == Inventory.CRAFT_RESULT:
-		return
-	var slot: ItemStack = inventory.slots[hovered]
-	if not slot.is_empty():
-		if slot.item_id != _drag_starting_id:
-			return
-		if slot.count >= ItemStack.MAX_SIZE:
-			return
-	_drag_slots.append(hovered)
+	_drag.motion(_slot_under_mouse())
 
 
-func _apply_drag_distribution() -> void:
-	var n: int = _drag_slots.size()
-	var per_slot: int = 0
-	if _drag_button == MOUSE_BUTTON_LEFT:
-		per_slot = _drag_starting_count / n
-	elif _drag_button == MOUSE_BUTTON_RIGHT:
-		per_slot = 1
-	if per_slot <= 0:
-		return
-	var distributed: int = 0
+func _sweep_excluded(slot: int) -> bool:
+	# Craft result is read-only; armor slots hold exactly one piece.
+	return slot == Inventory.CRAFT_RESULT or _is_armor_slot(slot)
+
+
+func _sweep_changed() -> void:
 	var craft_touched: bool = false
-	for slot_index: int in _drag_slots:
-		var slot: ItemStack = inventory.slots[slot_index]
-		if slot.is_empty():
-			slot.item_id = _drag_starting_id
-		var room: int = ItemStack.MAX_SIZE - slot.count
-		var added: int = mini(per_slot, room)
-		slot.count += added
-		distributed += added
+	for slot_index: int in _drag.swept():
 		if slot_index >= Inventory.CRAFT_START and slot_index < Inventory.CRAFT_RESULT:
 			craft_touched = true
-	_cursor.count -= distributed
-	if _cursor.count <= 0:
-		_cursor.item_id = Blocks.AIR
-		_cursor.count = 0
 	if craft_touched:
 		inventory.recompute_craft_result()
 	inventory.changed.emit()

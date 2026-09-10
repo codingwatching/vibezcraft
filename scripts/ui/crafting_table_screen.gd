@@ -47,11 +47,9 @@ var _font: FontFile
 var _tooltip: Label
 
 # Drag state — same model as InventoryScreen
-var _drag_active: bool = false
-var _drag_button: int = -1
-var _drag_slots: Array = []  # mixed: positive = inventory slot, negative = -(local_idx + 1)
-var _drag_starting_count: int = 0
-var _drag_starting_id: int = 0
+# Press-time click + live sweep state machine shared with the other
+# container screens. See slot_drag.gd.
+var _drag := SlotDrag.new()
 
 # Panel root rect — tap-outside-close hit test (mobile).
 var _panel_root: Control
@@ -73,6 +71,13 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_cursor = ItemStack.new()
+	_drag.none_id = -100
+	_drag.cursor = _cursor
+	_drag.stack_at = _slot_at
+	_drag.sweep_excluded = _sweep_excluded
+	_drag.click_left = _handle_left_click
+	_drag.click_right = _handle_right_click
+	_drag.changed = _sweep_changed
 	_local_slots = []
 	for i in range(TOTAL_LOCAL_SLOTS):
 		_local_slots.append(ItemStack.new())
@@ -354,7 +359,7 @@ func _input(event: InputEvent) -> void:
 			_on_mouse_down(event.button_index, slot)
 		else:
 			_on_mouse_up(event.button_index, slot)
-	elif event is InputEventMouseMotion and _drag_active:
+	elif event is InputEventMouseMotion and _drag.active:
 		_track_drag_motion()
 
 
@@ -402,112 +407,27 @@ func _is_craft_grid_slot(slot_id: int) -> bool:
 
 
 func _on_mouse_down(button: int, slot: int) -> void:
-	if button != MOUSE_BUTTON_LEFT and button != MOUSE_BUTTON_RIGHT:
-		return
-	if slot == -100:
-		return
-	if not _cursor.is_empty() and not _is_result_slot(slot):
-		_drag_active = true
-		_drag_button = button
-		_drag_slots = [slot]
-		_drag_starting_count = _cursor.count
-		_drag_starting_id = _cursor.item_id
-		return
-	if (
-		button == MOUSE_BUTTON_LEFT
-		and _cursor.is_empty()
-		and not _is_result_slot(slot)
-		and not _slot_at(slot).is_empty()
-	):
-		_handle_left_click(slot)
-		_drag_active = false
-		_drag_button = button
-		_drag_slots = [slot]
-		return
-	_drag_active = false
-	_drag_button = button
-	_drag_slots = [slot]
+	_drag.press(button, slot)
 
 
 func _on_mouse_up(button: int, slot: int) -> void:
-	if button != _drag_button:
-		return
-	if _drag_active and _drag_slots.size() > 1:
-		_apply_drag_distribution()
-	else:
-		var click_slot: int = slot if slot != -100 else _drag_slots[0]
-		if click_slot != -100 and click_slot != _drag_slots[0]:
-			if button == MOUSE_BUTTON_LEFT:
-				_handle_left_click(click_slot)
-			elif button == MOUSE_BUTTON_RIGHT:
-				_handle_right_click(click_slot)
-		elif click_slot != -100 and not _was_press_pickup():
-			if button == MOUSE_BUTTON_LEFT:
-				_handle_left_click(click_slot)
-			elif button == MOUSE_BUTTON_RIGHT:
-				_handle_right_click(click_slot)
-	_drag_active = false
-	_drag_button = -1
-	_drag_slots.clear()
-
-
-func _was_press_pickup() -> bool:
-	return (
-		_drag_button == MOUSE_BUTTON_LEFT
-		and not _drag_active
-		and _drag_slots.size() == 1
-		and not _cursor.is_empty()
-		and _slot_at(_drag_slots[0]) != null
-		and _slot_at(_drag_slots[0]).is_empty()
-	)
+	_drag.release(button, slot)
 
 
 func _track_drag_motion() -> void:
-	var hovered: int = _slot_under_mouse()
-	if hovered == -100 or _drag_slots.has(hovered):
-		return
-	if _is_result_slot(hovered):
-		return
-	var slot: ItemStack = _slot_at(hovered)
-	if slot == null:
-		return
-	if not slot.is_empty():
-		if slot.item_id != _drag_starting_id:
-			return
-		if slot.count >= ItemStack.MAX_SIZE:
-			return
-	_drag_slots.append(hovered)
+	_drag.motion(_slot_under_mouse())
 
 
-func _apply_drag_distribution() -> void:
-	var n: int = _drag_slots.size()
-	var per_slot: int = 0
-	if _drag_button == MOUSE_BUTTON_LEFT:
-		per_slot = _drag_starting_count / n
-	elif _drag_button == MOUSE_BUTTON_RIGHT:
-		per_slot = 1
-	if per_slot <= 0:
-		return
-	var distributed: int = 0
-	var craft_touched: bool = false
-	for slot_id: int in _drag_slots:
-		var slot: ItemStack = _slot_at(slot_id)
-		if slot == null:
-			continue
-		if slot.is_empty():
-			slot.item_id = _drag_starting_id
-		var room: int = ItemStack.MAX_SIZE - slot.count
-		var added: int = mini(per_slot, room)
-		slot.count += added
-		distributed += added
+func _sweep_excluded(slot_id: int) -> bool:
+	return _is_result_slot(slot_id)
+
+
+func _sweep_changed() -> void:
+	for slot_id: int in _drag.swept():
 		if _is_craft_grid_slot(slot_id):
-			craft_touched = true
-	_cursor.count -= distributed
-	if _cursor.count <= 0:
-		_cursor.item_id = Blocks.AIR
-		_cursor.count = 0
-	if craft_touched:
-		_recompute_result()
+			_recompute_result()
+			break
+	inventory.changed.emit()
 	_refresh()
 
 

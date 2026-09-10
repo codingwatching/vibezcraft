@@ -290,3 +290,27 @@ func test_visible_skeleton_fires_then_starts_alpha_cooldown() -> void:
 	var arrow: Node = _main.get_child(_main.get_child_count() - 1)
 	assert_eq(int(arrow.get("_fixed_damage")), 4, "skeleton arrow carries Alpha fixed damage")
 	assert_eq(float(arrow.get("_gravity_per_tick")), 0.03, "skeleton arrow carries lv gravity")
+
+
+# dh.java:39 aims at `target.posY - 0.2`, and the PLAYER's posY is eye
+# level (eb.java:22 yOffset 1.62), not the feet. Aiming at the feet put
+# every volley 1.62 m low — "skeletons miss most shots if you're higher
+# than them" (issue #7).
+func test_skeleton_aims_below_the_players_eyes_not_the_feet() -> void:
+	var skeleton_script: GDScript = MobRegistry.script_for("skeleton")
+	# Player centre at 64.9 → feet 64.0, eyes 65.62. Bow at 65.5, 7.5 m out.
+	var offset: Vector3 = skeleton_script.vanilla_aim_offset(
+		Vector3(7.5, 65.5, 0.0), Vector3(0.0, 64.9, 0.0), false
+	)
+	# 65.62 - 0.2 (aim) + 7.5 * 0.2 (lob) - 65.5 (spawn) = 1.42
+	assert_almost_eq(offset.y, 1.42, 0.0001, "vertical term uses the eye-level posY")
+	assert_almost_eq(offset.x, -7.5, 0.0001)
+
+
+func test_skeleton_aims_at_a_mobs_feet_as_vanilla_does() -> void:
+	var skeleton_script: GDScript = MobRegistry.script_for("skeleton")
+	# A mob's origin IS its feet (yOffset 0), so posY - 0.2 is just below them.
+	var offset: Vector3 = skeleton_script.vanilla_aim_offset(
+		Vector3(7.5, 65.5, 0.0), Vector3(0.0, 64.0, 0.0), true
+	)
+	assert_almost_eq(offset.y, 64.0 - 0.2 + 1.5 - 65.5, 0.0001)

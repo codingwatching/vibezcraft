@@ -325,6 +325,17 @@ static func _emit_special_cell(
 		_emit_repeater_geometry(
 			chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
 		)
+	elif ms == Blocks.MESH_SHAPE_DIRECTIONAL_CUBE:
+		# Same six culled faces as the cube pass — _emit_block_faces already
+		# resolves per-face textures from metadata. It lives here only so
+		# the native cube pass (flat per-id UV table) never touches it.
+		_emit_block_faces(
+			chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces, plant_faces
+		)
+	elif ms == Blocks.MESH_SHAPE_CACTUS:
+		_emit_cactus_geometry(
+			chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces, plant_faces
+		)
 	elif ms == Blocks.MESH_SHAPE_NONE:
 		# Portal — drawn by PortalRenderer and physically passable, but still
 		# ray-targetable through x.java's orientation-dependent 1/4-thick
@@ -769,6 +780,77 @@ static func _emit_block_faces(
 		# the index winding above so collision matches the visible face.
 		if not is_soul_sand:
 			_append_collision_quad(collision_faces, v0, v1, v2, v3)
+
+
+# je.java render type 13 (RenderBlocks.renderBlockCactusImpl): bottom and
+# top are ordinary full faces; each of the four sides is the ordinary
+# full face translated 1/16 inward along its own normal, so the four
+# side quads cross each other at the corners and the transparent spine
+# columns of the side texture read as spines, not as slits into the
+# block. Faces are culled only by an OPAQUE neighbour — never by another
+# cactus — because the 1/16 rim of a stacked cactus's top face is
+# visible around the one above it.
+#
+# Physics: je.java:32-35 `d()` — sides in 1/16 and the top at 15/16.
+# Selection: je.java:37-40 `f()` — sides in 1/16, full height.
+static func _emit_cactus_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array,
+	plant_faces: PackedVector3Array
+) -> void:
+	var origin := Vector3(x, y, z)
+	const INSET: float = 0.0625
+	for face_idx in range(6):
+		var no: Vector3i = _FACE_NEIGHBOR[face_idx]
+		var neighbor_id := chunk.get_block(x + no.x, y + no.y, z + no.z)
+		if Blocks.is_opaque(neighbor_id) and neighbor_id != Blocks.LEAVES:
+			continue
+		var face_verts: Array = _FACE_VERTS[face_idx]
+		var normal: Vector3 = _FACE_NORMALS[face_idx]
+		# Sides slide inward along their normal; top and bottom stay put.
+		var shift: Vector3 = -normal * INSET if face_idx >= 2 else Vector3.ZERO
+		var rect: Rect2 = BlockAtlas.uv_rect_for(Blocks.CACTUS, _FACE_KIND[face_idx])
+		var base := verts.size()
+		for i in range(4):
+			verts.append(origin + shift + (face_verts[i] as Vector3))
+			norms.append(normal)
+		if face_idx < 2:
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		else:
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+		var sky_n: float = float(chunk.get_sky_light(x + no.x, y + no.y, z + no.z)) * _LIGHT_SCALE
+		var blk_n: float = float(chunk.get_block_light(x + no.x, y + no.y, z + no.z)) * _LIGHT_SCALE
+		# Alpha-tested (COLOR.a = 1): the spine columns must discard.
+		var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+		for i in range(4):
+			colors.append(face_light)
+		indices.append_array(
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
+		)
+	_emit_collision_box(
+		collision_faces,
+		origin + Vector3(INSET, 0.0, INSET),
+		origin + Vector3(1.0 - INSET, 1.0 - INSET, 1.0 - INSET)
+	)
+	_emit_collision_box(
+		plant_faces,
+		origin + Vector3(INSET, 0.0, INSET),
+		origin + Vector3(1.0 - INSET, 1.0, 1.0 - INSET)
+	)
 
 
 static func _append_collision_quad(

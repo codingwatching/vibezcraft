@@ -2761,3 +2761,33 @@ Then verify in-browser via a FRESH navigation, not a reload (see the web
 export notes), specifically: portal has no collision, the sheet renders,
 travel works, and the Nether's ambient floor reaches the shader — the
 four things the stale binary would silently get wrong.
+
+### 17.14 Issue #7 follow-ups (2026-09-10)
+
+**The arrival frame that never showed (issue #7: "obsidian for portal
+doesn't appear in nether").** Not a construction or persistence fault —
+block data always held the frame, which is why the sheet (drawn from
+block data by PortalRenderer) was visible inside a frameless hole. The
+mesh was being overwritten AFTER the rebuild. `_materialize`'s ring
+spawn dirties every resident neighbour (seam heals) and the relight
+results keep dirtying chunks for frames afterwards, so a ChunkNode worker
+remesh holding a PRE-EDIT snapshot is routinely in flight when
+`destination_for` writes the frame and `rebuild_chunk_now` meshes it
+synchronously. That rebuild clears `chunk.dirty`; when the stale worker
+landed, `_process`'s drain accepted it (`not chunk.dirty`) and applied it
+over the correct mesh — obsidian gone from mesh and collision, present
+in data. The same interleaving with the stale result already drained and
+parked behind the per-frame apply budget produced the identical outcome.
+
+Fixed in ChunkNode: the synchronous rebuild paths (`rebuild_now`, which
+`ChunkManager.rebuild_chunk_now` now routes through, and
+`rebuild_mesh_immediate` for falling-block landings) flag any in-flight
+worker result as stale and discard a queued `_pending_apply`. Reproduced
+and pinned by `tests/test_remesh_race.gd`, which drives a real chunk node
+through both orderings and a control case where a later ordinary edit
+still remeshes.
+
+**Why the round-trip probe passed.** It walked, and the frame was built
+in air, so the stale collision was air too — invisible obsidian is
+walkable. The probe asserted movement, not geometry. A sharper probe
+would also count obsidian faces in the arrival chunk's mesh.

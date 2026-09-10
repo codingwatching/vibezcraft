@@ -475,6 +475,12 @@ func _ai_tick() -> void:
 	_velocity_brake()
 	_ai_aiming = true
 	if _ai_shot_cooldown_sec <= 0.0:
+		# The arrow spawns at the bow, and the bow hangs from the right
+		# arm. _process raises that arm to the aim pose only AFTER this
+		# tick, so without this the first shot of every engagement left
+		# the hanging bow at hip height and flew from there.
+		if _arm_r_pivot != null:
+			_arm_r_pivot.rotation = Vector3(_AIM_ARM_PITCH, 0.0, 0.0)
 		_fire_arrow_at(player, true)
 		_ai_shot_cooldown_sec = _AI_SHOT_COOLDOWN_SEC
 
@@ -606,6 +612,30 @@ func _tick_walk_path() -> void:
 	_face_walk_direction()
 
 
+# dh.java:36-40 — the un-noised shot vector from the arrow's spawn point:
+#   (target.posX - posX, target.posY - 0.2 - arrow.posY + horiz * 0.2, ...)
+# The `horiz * 0.2` is a linear lob, not modern parabolic compensation.
+#
+# `target_pos` is the target's node origin, which means different things
+# per target and the vertical term has to know which. The clone keeps the
+# player's origin at its capsule CENTRE, 0.9 m above the feet; a mob's
+# origin is its feet.
+static func vanilla_aim_offset(
+	spawn_pos: Vector3, target_pos: Vector3, target_is_mob: bool
+) -> Vector3:
+	var horiz_dist: float = Vector2(target_pos.x - spawn_pos.x, target_pos.z - spawn_pos.z).length()
+	var aim_y: float
+	if target_is_mob:
+		aim_y = target_pos.y - 0.2
+	else:
+		aim_y = target_pos.y - 0.9 + 1.62 - 0.2
+	return Vector3(
+		target_pos.x - spawn_pos.x,
+		aim_y - spawn_pos.y + horiz_dist * 0.2,
+		target_pos.z - spawn_pos.z
+	)
+
+
 # Spawn an Arrow projectile at the skeleton's bow hand, aimed at the
 # player's torso (eye height - 0.4 m). Velocity = unit vector toward
 # target × _AI_ARROW_SPEED. Mirrors vanilla `dh.java::a(Entity, distance)`
@@ -618,11 +648,15 @@ func _fire_arrow_at(player: Node3D, visibility_confirmed: bool = false) -> void:
 	# one decision tick does not trace the same segment twice.
 	if not visibility_confirmed and not has_line_of_sight(player):
 		return
-	# The clone stores Player.global_position at its 1.8 m capsule center;
-	# Alpha's target posY is feet. Keep both representations here because
-	# dh.java builds its vertical shot component from target feet.
+	# dh.java:39 aims at `target.posY - 0.2`. For the PLAYER posY is not
+	# the feet: eb.java:22 sets yOffset 1.62 and lw.java:127 makes posY =
+	# minY + yOffset, i.e. eye level. Mobs have yOffset 0, so their posY
+	# is the feet. An earlier port read "feet" for both, which put the
+	# aim point 1.62 m too low — arrows landed at the player's feet on
+	# flat ground and buried themselves in the ledge face whenever the
+	# player stood above the skeleton (issue #7). The clone's player
+	# origin is the capsule centre, 0.9 m above the feet.
 	var target_pos: Vector3 = player.global_position
-	var target_feet_y: float = target_pos.y if player is MobBase else target_pos.y - 0.9
 	# Spawn AT THE BOW. The bow mesh is parented to the right-arm
 	# pivot at arm-local (0, -0.75, 0) — the hand. With the arm raised
 	# to the aim pose (+π/2 X), the hand extends forward of the
@@ -645,15 +679,7 @@ func _fire_arrow_at(player: Node3D, visibility_confirmed: bool = false) -> void:
 		_bow_mesh.global_position if _bow_mesh != null else global_position + Vector3(0, 1.5, 0)
 	)
 	var spawn_pos: Vector3 = bow_world + spawn_forward
-	var horiz := Vector3(target_pos.x - spawn_pos.x, 0.0, target_pos.z - spawn_pos.z)
-	var horiz_dist: float = horiz.length()
-	# dh.java: target.posY - 0.2 - arrow.posY + horizontalDistance * 0.2.
-	# This is a linear lead term, not modern parabolic compensation.
-	var to_target := Vector3(
-		target_pos.x - spawn_pos.x,
-		target_feet_y - 0.2 - spawn_pos.y + horiz_dist * 0.2,
-		target_pos.z - spawn_pos.z
-	)
+	var to_target: Vector3 = vanilla_aim_offset(spawn_pos, target_pos, player is MobBase)
 	if to_target.length_squared() < 0.01:
 		return
 	var dir: Vector3 = to_target.normalized()

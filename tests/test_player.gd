@@ -305,3 +305,73 @@ func test_ambient_damage_has_no_knockback() -> void:
 	# Drown / lava / fall etc. pass no direction — velocity must stay put.
 	player.take_damage(1, "drown")
 	assert_eq(player.velocity, Vector3.ZERO, "ambient damage does not knock back")
+
+
+# --- Bed wake relocation (issue #7: soft-locked after sleeping) ---
+
+
+func _wake(cm: FakeFloorCM, foot: Vector3i) -> Vector3:
+	var player := _make_player()
+	var pos: Vector3 = player.bed_wake_position(cm, foot)
+	player.free()
+	return pos
+
+
+# A bed on a stone floor, walled on the -X side, air everywhere else.
+func _bed_room() -> FakeFloorCM:
+	var cm := FakeFloorCM.new()
+	for x: int in range(-3, 4):
+		for z: int in range(-3, 4):
+			cm.cells[Vector3i(x, 63, z)] = Blocks.STONE
+	cm.cells[Vector3i(0, 64, 0)] = Blocks.BED_FOOT
+	cm.cells[Vector3i(0, 64, 1)] = Blocks.BED_HEAD
+	for z: int in range(-3, 4):
+		cm.cells[Vector3i(-1, 64, z)] = Blocks.STONE
+		cm.cells[Vector3i(-1, 65, z)] = Blocks.STONE
+	return cm
+
+
+func test_bed_wake_stands_the_capsule_beside_the_bed() -> void:
+	var cm := _bed_room()
+	var pos: Vector3 = _wake(cm, Vector3i(0, 64, 0))
+	var cell := Vector3i(floori(pos.x), floori(pos.y), floori(pos.z))
+	assert_ne(cell, Vector3i(0, 64, 0), "does not stand in the foot cell")
+	assert_ne(cell, Vector3i(0, 64, 1), "does not stand in the head cell")
+	assert_eq(cm.get_world_block(cell), Blocks.AIR, "stands in an air cell")
+	assert_eq(cm.get_world_block(cell + Vector3i(0, -1, 0)), Blocks.STONE, "over a solid floor")
+	# Origin is the capsule CENTRE: floor top + half height + skin, never
+	# cell + 0.5 (which buried the body 0.4 m and paralysed move_and_slide).
+	assert_almost_eq(pos.y, 64.901, 0.0001, "capsule rests on the floor, not inside it")
+	cm.free()
+
+
+func test_bed_wake_never_picks_the_walled_side() -> void:
+	var cm := _bed_room()
+	var pos: Vector3 = _wake(cm, Vector3i(0, 64, 0))
+	assert_gt(pos.x, 0.0, "the -X wall is never chosen")
+	cm.free()
+
+
+func test_bed_wake_falls_back_onto_the_mattress_when_boxed_in() -> void:
+	var cm := _bed_room()
+	for x: int in range(-3, 4):
+		for z: int in range(-3, 4):
+			if (
+				Vector3i(x, 64, z) != Vector3i(0, 64, 0)
+				and Vector3i(x, 64, z) != Vector3i(0, 64, 1)
+			):
+				cm.cells[Vector3i(x, 64, z)] = Blocks.STONE
+	var pos: Vector3 = _wake(cm, Vector3i(0, 64, 0))
+	assert_almost_eq(pos.x, 0.5, 0.0001, "on the foot cell")
+	assert_almost_eq(pos.z, 0.5, 0.0001, "on the foot cell")
+	assert_almost_eq(pos.y, 64.0 + 0.5625 + 0.901, 0.0001, "rides on top of the 9/16 bed box")
+	cm.free()
+
+
+func test_bed_wake_maps_a_standing_point_to_itself() -> void:
+	# Respawn sanitises the stored bed spawn through the same search; a
+	# point that already stands in a clear cell must not move.
+	var cm := _bed_room()
+	var pos: Vector3 = _wake(cm, Vector3i(2, 64, 0))
+	assert_eq(Vector3i(floori(pos.x), floori(pos.y), floori(pos.z)), Vector3i(2, 64, 0))
+	cm.free()

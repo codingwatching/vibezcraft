@@ -140,14 +140,15 @@ static func update(manager, pos: Vector3i, block_id: int) -> void:
 		# ja.java:45-51 — water's 2-source rule. With >=2 source neighbors
 		# and a solid block below, convert to source (level=0). This is
 		# what makes an infinite-water pool work from a 2x2 grid of buckets.
+		#
+		# Only the solid-below case is live in Alpha. ja.java:48's second
+		# branch tests `cy2.e(n2, n3, n4) == 0` — THIS cell's own meta —
+		# which is never true inside the `n6 > 0` block, so a cell over a
+		# source never becomes one. (The below-cell-is-source rule is
+		# 1.8+ behaviour; an earlier port had it here.)
 		if is_water_fluid and source_count >= 2:
 			var below_id: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
 			if _is_solid_blocker(below_id):
-				proposed = 0
-			elif (
-				Blocks.is_water(below_id)
-				and manager.get_world_block_meta(pos + Vector3i(0, -1, 0)) == 0
-			):
 				proposed = 0
 		# ja.java:52-55 — lava's 1-in-4 stall. Vanilla `n6 < 8 && n5 < 8
 		# && n5 > n6` — all raw comparisons (n6 < 8 excludes falling,
@@ -192,8 +193,12 @@ static func update(manager, pos: Vector3i, block_id: int) -> void:
 			# promotes, and never feeds level 2 outward. Fall through.
 			_promote_to_still(manager, pos, block_id)
 	else:
-		# Source block — always reschedule so we continue feeding outward.
-		TickScheduler.schedule(pos, block_id, tick_rate)
+		# Source block — ja.java:68-70 promotes it to STILL like any other
+		# settled cell (`j()` in the else branch). A source that never
+		# settles ticks at 4 Hz for the life of the world; the spread
+		# phase below still runs this tick, and any neighbour change
+		# demotes it back to FLOWING to spread again.
+		_promote_to_still(manager, pos, block_id)
 	# Refresh current_level after any self-update.
 	current_level = manager.get_world_block_meta(pos)
 	var spread_level: int = _effective_level(current_level)

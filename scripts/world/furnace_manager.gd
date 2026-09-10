@@ -183,7 +183,11 @@ func _tick_all() -> void:
 		var current: int = _chunk_manager.get_world_block(pos)
 		var target: int = Blocks.LIT_FURNACE if should_lit else Blocks.FURNACE
 		if current != target and (current == Blocks.FURNACE or current == Blocks.LIT_FURNACE):
-			_chunk_manager.set_world_block(pos, target)
+			# mj.java:96-105 (updateFurnaceBlockState) re-applies the facing
+			# after the id swap; a bare set_world_block zeroes meta and the
+			# furnace would snap round to face north every time it lit.
+			var facing: int = _chunk_manager.get_world_block_meta(pos)
+			_chunk_manager.set_world_block(pos, target, facing)
 	_lit_changes.clear()
 
 

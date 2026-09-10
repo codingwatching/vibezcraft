@@ -349,13 +349,11 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		_build_base_terrain_native(chunk, chunk_x, chunk_z)
 	else:
 		_build_base_terrain_gdscript(chunk, chunk_x, chunk_z)
-	# 2. Ore veins — only replaces stone, never grass/dirt/bedrock.
-	_scatter_ores(chunk, chunk_x, chunk_z)
-	# 2b. Caves — Alpha's MapGenCaves (lx.java). Random-walk worm tunnels
-	#    carve STONE/DIRT/GRASS → AIR. Runs AFTER ores so veins get
-	#    opened up by caves (mining loop); BEFORE beaches so the sand
-	#    pass sees cave-affected surface cells. Radius 8 chunks — see
-	#    scripts/world/worldgen_caves.gd for full port notes.
+	# 2. Caves — Alpha's MapGenCaves (lx.java). Random-walk worm tunnels
+	#    carve STONE/DIRT/GRASS → AIR. Runs BEFORE ores (see 2b) and
+	#    BEFORE beaches so the sand pass sees cave-affected surface
+	#    cells. Radius 8 chunks — see scripts/world/worldgen_caves.gd
+	#    for full port notes.
 	#
 	# Native fast path: WorldgenNative.scatter_caves runs the same
 	# algorithm (bit-exact JavaRandom stream) in C++, ~10× faster than
@@ -379,6 +377,17 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		PerfProbe.end("worldgen.caves", caves_token)
 	else:
 		_CAVES_SCRIPT.scatter(chunk, chunk_x, chunk_z)
+	# 2b. Ore veins — only replaces stone, never grass/dirt/bedrock.
+	#    AFTER caves, as vanilla orders it: px.java:176 carves caves inside
+	#    provideChunk, and WorldGenMinable (df.java:39) runs later from
+	#    populate and replaces STONE only. A vein crossing a tunnel is
+	#    therefore cut by it — the cells that fell in the void are simply
+	#    never placed, and the cross-section shows on the wall. The
+	#    earlier ores-then-caves order, justified as "veins get opened up
+	#    by caves", left every such vein standing as a free-floating ore
+	#    pillar in the tunnel (issue #7), because the carver only removes
+	#    stone/dirt/grass.
+	_scatter_ores(chunk, chunk_x, chunk_z)
 	# 2c. Liquid springs — Alpha pj.java (WorldGenLiquids). Plants
 	# WATER_STILL / LAVA_STILL source blocks in stone walls (3 stone +
 	# 1 air neighbor pattern) so caves get the vanilla "small pools +

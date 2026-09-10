@@ -18,6 +18,15 @@ var chunk: Chunk
 # digs again while a worker is running, `chunk.dirty` gets set again and
 # we requeue once the current task lands.
 var _remesh_task_id: int = -1
+# Set by the synchronous rebuild paths while a worker remesh is in
+# flight: that worker's snapshot predates the edit the rebuild just
+# meshed, so its result must be DROPPED on arrival, not applied over the
+# newer mesh. Without this the Nether arrival frame vanished — the ring
+# spawn's seam heals dispatch remeshes, the teleporter writes the
+# obsidian and rebuilds (clearing `dirty`), and the stale result then
+# passed the `not chunk.dirty` drain check and overwrote mesh +
+# collision while block data kept the frame (issue #7).
+var _inflight_remesh_stale: bool = false
 # Single-element Array holding the most-recent worker result. Passed to
 # the worker by reference so it can write without touching `self`. Array
 # is RefCounted + the worker holds a strong reference, so it survives
@@ -177,8 +186,9 @@ func _process(_delta: float) -> void:
 			data = _remesh_result_holder[0]
 			_remesh_result_holder[0] = {}
 		_remesh_mutex.unlock()
-		if not data.is_empty() and not chunk.dirty:
+		if not data.is_empty() and not chunk.dirty and not _inflight_remesh_stale:
 			_pending_apply = data
+		_inflight_remesh_stale = false
 	# 2) If we're holding a pending apply, try to spend a ChunkManager
 	#    apply budget this frame. Priority-apply bypasses the budget for
 	#    player-edited chunks so the edit lands in 1-2 frames instead of
@@ -344,8 +354,28 @@ func cancel_remesh_task() -> void:
 # the main thread; caller should use the async dispatch path instead
 # whenever a 1-frame delay is acceptable.
 func rebuild_mesh_immediate() -> void:
+	_invalidate_async_results()
 	_apply_mesh_data(Mesher.mesh_chunk_fast(chunk))
 	chunk.dirty = false
+
+
+# Same as rebuild_mesh_immediate but ALSO cooks collision this frame —
+# the contract ChunkManager.rebuild_chunk_now / falling-block landings
+# need (an entity swaps for a block mid-frame).
+func rebuild_now() -> void:
+	_invalidate_async_results()
+	_apply_mesh_data(Mesher.mesh_chunk_fast(chunk))
+	_cook_pending_collision()
+	chunk.dirty = false
+
+
+# A synchronous rebuild supersedes every asynchronous result that was
+# produced from older data: the one still in the worker, and one that
+# already landed but is waiting on the per-frame apply budget.
+func _invalidate_async_results() -> void:
+	_inflight_remesh_stale = _remesh_task_id != -1
+	_pending_apply = {}
+	_priority_apply = false
 
 
 # Toggle the StaticBody3D's collision shape without remeshing. Called by

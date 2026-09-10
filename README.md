@@ -16,9 +16,9 @@ Gameplay and scene-graph logic is GDScript. Six performance-critical paths—chu
 
 ## Download
 
-**[Download VibezCraft v1.1.0](https://vibezcraft.net/#download)** for macOS or Windows. The universal macOS build is signed and notarized for Apple Silicon and Intel Macs; Windows is available as an installer or portable ZIP.
+**[Download VibezCraft v1.1.1](https://vibezcraft.net/#download)** for macOS or Windows. The universal macOS build is signed and notarized for Apple Silicon and Intel Macs; Windows is available as an installer or portable ZIP.
 
-[Release notes](https://github.com/donth77/vibezcraft/releases/tag/v1.1.0) · [All releases](https://github.com/donth77/vibezcraft/releases)
+[Release notes](https://github.com/donth77/vibezcraft/releases/tag/v1.1.1) · [All releases](https://github.com/donth77/vibezcraft/releases)
 
 ## Features
 

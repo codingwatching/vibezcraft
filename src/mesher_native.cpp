@@ -94,6 +94,33 @@ static inline bool cube_needs_alpha_test(int id) {
 			|| id == MesherNative::SLIME_BLOCK;
 }
 
+// Cells the native cube pass must NOT emit: everything whose
+// Blocks.mesh_shape is not MESH_SHAPE_CUBE. The GDScript appendix
+// (Mesher._append_special_cells / the legacy interleaved scan) owns
+// their geometry. Mirrors Blocks.needs_gdscript_mesher minus the
+// worldgen-hot cross plants and snow layers, which the lit2+ pass emits
+// natively itself (see the call sites).
+static inline bool is_gdscript_shape(int id) {
+	using M = MesherNative;
+	switch (id) {
+		case M::FIRE: case M::TORCH: case M::CHEST: case M::FENCE:
+		case M::WOOD_STAIRS: case M::COBBLESTONE_STAIRS: case M::WOODEN_DOOR:
+		case M::IRON_DOOR: case M::LADDER: case M::CROPS:
+		case M::HALF_SLAB: case M::WOOD_HALF_SLAB: case M::COBBLESTONE_HALF_SLAB:
+		case M::SIGN_STANDING: case M::SIGN_WALL: case M::FENCE_GATE: case M::RAIL:
+		case M::BED_FOOT: case M::BED_HEAD: case M::REDSTONE_WIRE:
+		case M::REDSTONE_TORCH: case M::REDSTONE_TORCH_OFF: case M::LEVER:
+		case M::STONE_BUTTON: case M::STONE_PRESSURE_PLATE: case M::WOODEN_PRESSURE_PLATE:
+		case M::PORTAL: case M::REDSTONE_REPEATER_OFF: case M::REDSTONE_REPEATER_ON:
+		// Directional cubes + cactus (issue #7).
+		case M::PUMPKIN: case M::JACK_O_LANTERN: case M::FURNACE: case M::LIT_FURNACE:
+		case M::CACTUS:
+			return true;
+		default:
+			return false;
+	}
+}
+
 // Vanilla BlockFluids.d() cull rule: emit a fluid face if the neighbor
 // isn't the same fluid family AND isn't opaque. Opaque excludes AIR,
 // LEAVES, GLASS, SAPLING, and the other fluid family — those all let
@@ -653,7 +680,7 @@ Dictionary MesherNative::mesh_chunk_data(
 				}
 				// Non-cube blocks are meshed by GDScript's
 				// _append_non_cube_geometry — skip cube face emission.
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL || id == REDSTONE_REPEATER_OFF || id == REDSTONE_REPEATER_ON) {
+				if (is_gdscript_shape(id) || id == SAPLING || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == TALL_GRASS) {
 					continue;
 				}
 				const bool is_soul_sand = id == SOUL_SAND;
@@ -950,7 +977,7 @@ Dictionary MesherNative::mesh_lit_core(
 							&lava_colors, sky_ptr, block_light_ptr, light_scale);
 					continue;
 				}
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL || id == REDSTONE_REPEATER_OFF || id == REDSTONE_REPEATER_ON) {
+				if (is_gdscript_shape(id) || id == SAPLING || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == TALL_GRASS) {
 					continue;
 				}
 				const bool is_soul_sand = id == SOUL_SAND;
@@ -1478,14 +1505,7 @@ void MesherNative::append_noncube_pass(Dictionary &result,
 								sky_ptr[idx], block_light_ptr[idx],
 								nc_verts, nc_norms, nc_uvs, nc_colors,
 								nc_indices, nc_plant_faces);
-					} else if (id == FIRE || id == TORCH || id == CHEST
-							|| id == FENCE || id == WOOD_STAIRS
-							|| id == COBBLESTONE_STAIRS || id == WOODEN_DOOR
-							|| id == IRON_DOOR || id == LADDER || id == CROPS
-							|| id == HALF_SLAB || id == WOOD_HALF_SLAB
-							|| id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING
-							|| id == SIGN_WALL || id == FENCE_GATE || id == RAIL
-							|| id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL || id == REDSTONE_REPEATER_OFF || id == REDSTONE_REPEATER_ON) {
+					} else if (is_gdscript_shape(id)) {
 						// Player-built shapes stay GDScript — returned in scan
 						// order for Mesher._append_special_cells.
 						special_cells.append(idx);

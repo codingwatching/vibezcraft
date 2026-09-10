@@ -86,6 +86,9 @@ func setup(
 	_velocity = p_initial_velocity
 	_pickup_delay = p_pickup_delay
 	_spawn_time = Time.get_ticks_msec() / 1000.0
+	# Counted by PerfWatchdog's slowdown report (hundreds of drops from a
+	# TNT'd sand pile are a classic frame-rate sink).
+	add_to_group("dropped_items")
 	_health = _SOURCE_HEALTH
 	_fire_ticks = 0
 	_hazard_tick_accum = 0.0

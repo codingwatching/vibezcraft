@@ -86,11 +86,21 @@ public:
 	static constexpr int SUGAR_CANE = 41;
 	static constexpr int ICE = 42;
 	static constexpr int SNOW_BLOCK = 43;
+	// CACTUS — MESH_SHAPE_CACTUS: full top/bottom, sides inset 1/16
+	// (je.java render type 13). GDScript special cell; non-opaque.
 	static constexpr int CACTUS = 44;
 	static constexpr int SNOW_LAYER = 45;
-	// PUMPKIN + JACK_O_LANTERN (46/47) are regular cubes — no skip
-	// needed, the native mesher handles directional faces via the meta
-	// lookup hook in mesh_chunk_data_lit.
+	// PUMPKIN / JACK_O_LANTERN / FURNACE / LIT_FURNACE —
+	// MESH_SHAPE_DIRECTIONAL_CUBE. Full opaque cubes whose SIDE textures
+	// depend on the facing metadata. The cube pass reads the flat per-id
+	// UV table and cannot pick a side texture from meta (it drew the
+	// carved face / furnace front on all four sides), so these are
+	// skipped here and emitted by Mesher._emit_block_faces through the
+	// special-cell appendix. They stay OPAQUE for neighbour culling.
+	static constexpr int PUMPKIN = 46;
+	static constexpr int JACK_O_LANTERN = 47;
+	static constexpr int FURNACE = 19;
+	static constexpr int LIT_FURNACE = 20;
 	static constexpr int BOOKSHELF = 48;
 	// CROPS — MESH_SHAPE_CROSS in GDScript. Listed in the native
 	// cube-pass skip list so the GDScript _append_non_cube_geometry

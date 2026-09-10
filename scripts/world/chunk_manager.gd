@@ -401,6 +401,7 @@ func _process(_delta: float) -> void:
 	var probe_token := PerfProbe.begin("chunk_mgr.tick")
 	_cached_player_chunk = _player_chunk_coord()
 	_applies_this_frame = 0
+	PerfWatchdog.tick(_delta, Engine.get_frames_per_second(), _watchdog_stats)
 	# Sub-probes: each step in _process gets its own ring so we can
 	# isolate the 80+ ms tick spikes without guessing. Lightweight —
 	# Time.get_ticks_usec is one syscall per begin/end and the ring
@@ -2151,13 +2152,56 @@ func set_world_block(world_pos: Vector3i, id: int, meta: int = -1) -> void:
 		# mount stuck in the powered state.
 		Redstone.on_block_removed(self, world_pos, old_id, old_meta)
 		enqueue_block_notification(world_pos)
-	if old_id != id:
+	# A fluid's LEVEL changing is a neighbour change too — ja.java:63 calls
+	# notifyBlocksOfNeighborChange after every meta write, and that is the
+	# only thing that wakes the STILL cells one ring further out (ir.java:16
+	# demotes them to FLOWING on notify). Gating this on the id alone
+	# meant a drained source woke ring 1, ring 1 re-levelled by a
+	# meta-only write, and rings 2+ never ticked again: "water doesn't
+	# deplete if the source is destroyed" (issue #7).
+	if fluid_notify_needed(old_id, id, old_meta, meta):
 		_notify_fluid_neighbors(world_pos)
+	if old_id != id:
 		# Placing any fluid variant (source or flowing) at `pos` requires
 		# the cell itself to start ticking. Vanilla calls this from
 		# BlockFluids.c() on initial place; we dispatch here centrally.
 		if Blocks.is_water(id) or Blocks.is_lava(id):
 			_schedule_fluid_tick(world_pos, id)
+
+
+# Whether a write from (old_id, old_meta) to (new_id, new_meta) must fan
+# out to the fluid neighbour-change hook. Any id change does; so does a
+# same-id write that changes a fluid's level. `new_meta < 0` means the
+# caller did not touch metadata. Static so the fluid tests can drive a
+# fake world through the exact same decision.
+static func fluid_notify_needed(old_id: int, new_id: int, old_meta: int, new_meta: int) -> bool:
+	if old_id != new_id:
+		return true
+	if new_meta < 0 or old_meta == (new_meta & 0xF):
+		return false
+	return Blocks.is_water(new_id) or Blocks.is_lava(new_id)
+
+
+# The counts PerfWatchdog logs when the frame rate stays low: everything
+# that scales the per-frame work and can only be read from here.
+func _watchdog_stats() -> String:
+	var mobs: int = MobBase.active_mobs().size()
+	var items: int = get_tree().get_nodes_in_group("dropped_items").size()
+	return (
+		"chunks=%d pending=%d dirty=%d relights=%d mobs=%d items=%d dim=%d pos=(%.0f, %.0f, %.0f)"
+		% [
+			_chunks.size(),
+			_pending.size(),
+			_dirty_loaded.size(),
+			_relight_results.size(),
+			mobs,
+			items,
+			DimensionContext.active(),
+			_player.global_position.x if _player != null else 0.0,
+			_player.global_position.y if _player != null else 0.0,
+			_player.global_position.z if _player != null else 0.0,
+		]
+	)
 
 
 # Same as set_world_block, but rebuilds the target chunk's mesh + collision
@@ -2204,11 +2248,10 @@ func _flush_immediate_rebuild(coord: Vector2i) -> void:
 	if not _chunks.has(coord):
 		return
 	var chunk_node: Node3D = _chunks[coord]
-	chunk_node._apply_mesh_data(Mesher.mesh_chunk_fast(chunk_node.chunk))
-	# Same-frame collision is this path's contract (falling-block landings
-	# swap entity → block mid-frame), so flush the deferred cook now.
-	chunk_node._cook_pending_collision()
-	chunk_node.chunk.dirty = false
+	# Same-frame mesh AND collision, and — through the node — invalidation
+	# of any async remesh produced from pre-edit data, which would
+	# otherwise land afterwards and overwrite this rebuild.
+	chunk_node.rebuild_now()
 
 
 # Queue orphaned leaves for gradual decay instead of removing them

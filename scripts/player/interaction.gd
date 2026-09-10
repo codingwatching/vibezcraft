@@ -61,6 +61,8 @@ const _CHAT_HUD: GDScript = preload("res://scripts/ui/chat_hud.gd")
 # increments _mining_cancel_streak; only when it crosses the threshold
 # do we actually flip is_mining to false. LMB-release + entity-hit are
 # real intent changes and bypass the debounce.
+# Re-swing cadence while the attack key is held on empty air.
+const _AIR_SWING_INTERVAL_SEC: float = 0.5
 const _MINING_CANCEL_DEBOUNCE_FRAMES: int = 2
 
 var _last_place_ms: int = 0
@@ -112,6 +114,7 @@ var _last_mining_particle_ms: int = 0
 # Used purely by the debug logger to compare expected vs measured break.
 var _mining_started_at: float = 0.0
 var _mining_cancel_streak: int = 0
+var _air_swing_timer: float = 0.0
 
 @onready var _camera: Camera3D = get_parent().get_node("Camera3D")
 @onready var _chunk_manager: Node3D = get_tree().root.get_node_or_null("Main/ChunkManager")
@@ -179,6 +182,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	# trigger block mining behind it). The hold-to-mine path in
 	# _update_mining still runs continuously for blocks.
 	if event.is_action_pressed("interact_break"):
+		# Minecraft.java:633-644 — `swingItem()` runs BEFORE the hit-type
+		# dispatch, so the arm swings on every left click whether or not
+		# anything is under the cursor. Gating it on a hit left punching
+		# the air silent and still (issue #7). Harmless when a block IS
+		# hit: the mining swing simply continues the cycle this seeds.
+		_trigger_player_use_swing()
+		_air_swing_timer = _AIR_SWING_INTERVAL_SEC
 		if _try_attack_painting():
 			return
 		if _try_attack_boat():
@@ -724,6 +734,7 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 	# block is under the cursor.
 	if not holding:
 		_mining_cancel_streak = 0
+		_air_swing_timer = 0.0
 		_set_player_mining(false)
 		_reset_mining()
 		return
@@ -736,6 +747,12 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 		_mining_cancel_streak += 1
 		if _mining_cancel_streak > _MINING_CANCEL_DEBOUNCE_FRAMES:
 			_set_player_mining(false)
+			# Minecraft.java:861-864 — a held attack key with nothing under
+			# the cursor re-clicks (and so re-swings) on a fixed cadence.
+			_air_swing_timer -= delta
+			if _air_swing_timer <= 0.0:
+				_trigger_player_use_swing()
+				_air_swing_timer = _AIR_SWING_INTERVAL_SEC
 		return
 	# Entity in the raycast (mob or boat) — mining is for blocks only;
 	# the crack overlay should never appear on entities and we shouldn't
@@ -2207,9 +2224,11 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 		SFX.play_place(Blocks.FENCE_GATE)
 		inv.consume_one_selected()
 		return true
-	if stack.item_id == Blocks.PUMPKIN or stack.item_id == Blocks.JACK_O_LANTERN:
-		var pumpkin_meta: int = _chest_meta_from_yaw()
-		_chunk_manager.set_world_block_with_meta(place, stack.item_id, pumpkin_meta)
+	if Blocks.has_directional_face(stack.item_id):
+		# Pumpkins and furnaces face the player who placed them — mj.java's
+		# onBlockPlacedBy quantises the yaw the same way the chest does.
+		var facing_meta: int = _chest_meta_from_yaw()
+		_chunk_manager.set_world_block_with_meta(place, stack.item_id, facing_meta)
 		SFX.play_place(stack.item_id)
 		inv.consume_one_selected()
 		return true

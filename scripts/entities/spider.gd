@@ -43,16 +43,21 @@ const _ABDOMEN_TEX_ORIGIN: Vector2i = Vector2i(0, 12)
 const _LEG_TEX_ORIGIN: Vector2i = Vector2i(18, 0)
 
 # Body cube placement — vanilla `lm.java::lm()` pivots all three body
-# cubes at Y=15 px (= 0.9375 m) with Z offsets head=-3, front=0,
-# abdomen=+9 (in px). Cube centers (= pivot + half-cube-offset):
-#   head:       (0, 0.9375, -0.4375)
-#   front body: (0, 0.9375, 0)
-#   abdomen:    (0, 0.9375, 0.5625)
-# In our world space (no Y-flip), 0.9375 m puts the body high in the
-# 0.9 m BB (the top cubes poke slightly above the AABB — matches
-# vanilla, the BB is conservative for hitreg, not the visible body).
+# cubes at model row 15 with Z offsets head=-3, front=0, abdomen=+9 (px).
+#
+# Model space is Y-DOWN: ec.java:48-50 renders with glScalef(-1,-1,1)
+# then translates by -24/16, so row 24 is the feet and row 15 sits
+# (24 - 15) / 16 = 0.5625 m ABOVE them. The first port read row 15 as
+# 0.9375 m up (15/16, no flip) and floated the whole body 0.375 m too
+# high — the abdomen top poked 0.29 m out of the 0.9 m hitbox and the
+# leg tips hung 0.23 m off the ground (issue #7 "floating spiders").
+# zombie.gd applies the same flip correctly (1.5 - row/16).
+# Cube centers:
+#   head:       (0, 0.5625, -0.4375)
+#   front body: (0, 0.5625, 0)
+#   abdomen:    (0, 0.5625, 0.5625)
 # Spider faces -Z (matches cow/pig/zombie convention; head goes forward).
-const _BODY_Y: float = 0.9375
+const _BODY_Y: float = 1.5 - 15.0 / 16.0
 const _HEAD_Z: float = -0.4375  # vanilla pivot(-3) + cube-center(-4)
 const _FRONT_BODY_Z: float = 0.0
 const _ABDOMEN_Z: float = 0.5625  # vanilla pivot Z=9 px
@@ -64,6 +69,11 @@ const _ABDOMEN_Z: float = 0.5625  # vanilla pivot Z=9 px
 const _LEG_PIVOT_Y: float = _BODY_Y
 const _LEG_PIVOT_X: float = 0.25  # vanilla 4 px = 0.25 m
 const _LEG_DROOP: float = PI * 0.25  # +45° roll (Godot Y-up convention)
+# lm.java:75-80 — the two MID pairs (f/g, h/i) droop only 0.74 of the
+# outer pairs' 45°. With the roll applied outermost (see
+# _leg_basis), that is what lands every tip about a pixel above the
+# floor instead of the mid legs stabbing through it.
+const _LEG_DROOP_MID: float = _LEG_DROOP * 0.74
 const _LEG_YAW_OUTER: float = PI * 0.25  # vanilla f10 * 2.0 = ±45°
 const _LEG_YAW_MID: float = PI * 0.125  # vanilla f10 * 1.0 = ±22.5°
 # Z offsets for the 4 pairs, front→back (matching vanilla `j/m`, `h/i`,
@@ -299,10 +309,22 @@ func _build_model() -> void:
 	# inversion!), front pair (j/m) ∓45°. We mirror that so the legs
 	# fan OUTWARD on each side — front legs angle forward, rear legs
 	# angle backward.
-	_build_leg_pair(mat, _LEG_Z_REAR, _LEG_YAW_OUTER)
-	_build_leg_pair(mat, _LEG_Z_MID_BACK, _LEG_YAW_MID)
-	_build_leg_pair(mat, _LEG_Z_MID_FRONT, -_LEG_YAW_MID)
-	_build_leg_pair(mat, _LEG_Z_FRONT, -_LEG_YAW_OUTER)
+	_build_leg_pair(mat, _LEG_Z_REAR, _LEG_YAW_OUTER, _LEG_DROOP)
+	_build_leg_pair(mat, _LEG_Z_MID_BACK, _LEG_YAW_MID, _LEG_DROOP_MID)
+	_build_leg_pair(mat, _LEG_Z_MID_FRONT, -_LEG_YAW_MID, _LEG_DROOP_MID)
+	_build_leg_pair(mat, _LEG_Z_FRONT, -_LEG_YAW_OUTER, _LEG_DROOP)
+
+
+# ka.java:99-107 — ModelRenderer rotates Z (roll), then Y (yaw), then X
+# (pitch) as successive glRotatef calls, so the vertex sees pitch first
+# and roll LAST: the roll tilts the already-yawed leg about the body's
+# Z axis. Godot's `A * B` applies B first, hence roll on the left. The
+# order matters for where the tip lands: a 45° roll applied along the
+# leg's own axis (the previous yaw-outer order) dropped it 11.3 px, well
+# through the floor from a 9 px pivot; vanilla's order drops it
+# 16 · cos(yaw) · sin(roll) ≈ 8 px, one pixel above the feet.
+static func _leg_basis(yaw: float, roll: float) -> Basis:
+	return Basis(Vector3.BACK, roll) * Basis(Vector3.UP, yaw)
 
 
 # Build a left+right leg pair pivoted at the body side. Rest pose:
@@ -310,7 +332,7 @@ func _build_model() -> void:
 # Pivots + base yaws + base rolls appended in left-then-right order so
 # _advance_walk_animation can layer vanilla's per-frame deltas without
 # losing the rest pose to Euler decomposition drift.
-func _build_leg_pair(mat: StandardMaterial3D, z_offset: float, f_yaw: float) -> void:
+func _build_leg_pair(mat: StandardMaterial3D, z_offset: float, f_yaw: float, droop: float) -> void:
 	var size := Vector3(
 		_LEG_CUBE_PX.x * _PIXEL_TO_METER,
 		_LEG_CUBE_PX.y * _PIXEL_TO_METER,
@@ -319,7 +341,7 @@ func _build_leg_pair(mat: StandardMaterial3D, z_offset: float, f_yaw: float) -> 
 	# LEFT leg.
 	var left_pivot := Node3D.new()
 	left_pivot.position = Vector3(-_LEG_PIVOT_X, _LEG_PIVOT_Y, z_offset)
-	left_pivot.transform.basis = Basis(Vector3.UP, f_yaw) * Basis(Vector3.BACK, _LEG_DROOP)
+	left_pivot.transform.basis = _leg_basis(f_yaw, droop)
 	add_child(left_pivot)
 	var left_leg := MeshInstance3D.new()
 	left_leg.mesh = MobCube.build_textured_cube(
@@ -332,13 +354,13 @@ func _build_leg_pair(mat: StandardMaterial3D, z_offset: float, f_yaw: float) -> 
 	left_pivot.add_child(left_leg)
 	_leg_pivots.append(left_pivot)
 	_leg_base_yaws.append(f_yaw)
-	_leg_base_rolls.append(_LEG_DROOP)
+	_leg_base_rolls.append(droop)
 	# RIGHT leg — mirror X. Vanilla `this.e.e = -this.d.e` pattern:
 	# yaw negated, droop negated (so the leg tip falls on the right
 	# side instead of crossing through the body).
 	var right_pivot := Node3D.new()
 	right_pivot.position = Vector3(_LEG_PIVOT_X, _LEG_PIVOT_Y, z_offset)
-	right_pivot.transform.basis = Basis(Vector3.UP, -f_yaw) * Basis(Vector3.BACK, -_LEG_DROOP)
+	right_pivot.transform.basis = _leg_basis(-f_yaw, -droop)
 	add_child(right_pivot)
 	var right_leg := MeshInstance3D.new()
 	right_leg.mesh = MobCube.build_textured_cube(
@@ -349,7 +371,7 @@ func _build_leg_pair(mat: StandardMaterial3D, z_offset: float, f_yaw: float) -> 
 	right_pivot.add_child(right_leg)
 	_leg_pivots.append(right_pivot)
 	_leg_base_yaws.append(-f_yaw)
-	_leg_base_rolls.append(-_LEG_DROOP)
+	_leg_base_rolls.append(-droop)
 
 
 func _make_textured_material(tex: Texture2D) -> StandardMaterial3D:
@@ -763,15 +785,11 @@ func _advance_walk_animation(delta: float) -> void:
 		# droop, equivalent under our axis convention).
 		var l_yaw: float = _leg_base_yaws[l_idx] + yaw_delta
 		var l_roll: float = _leg_base_rolls[l_idx] - roll_delta
-		_leg_pivots[l_idx].transform.basis = (
-			Basis(Vector3.UP, l_yaw) * Basis(Vector3.BACK, l_roll)
-		)
+		_leg_pivots[l_idx].transform.basis = _leg_basis(l_yaw, l_roll)
 		# Right: mirror — yaw subtracts the same delta, roll adds.
 		var r_yaw: float = _leg_base_yaws[r_idx] - yaw_delta
 		var r_roll: float = _leg_base_rolls[r_idx] + roll_delta
-		_leg_pivots[r_idx].transform.basis = (
-			Basis(Vector3.UP, r_yaw) * Basis(Vector3.BACK, r_roll)
-		)
+		_leg_pivots[r_idx].transform.basis = _leg_basis(r_yaw, r_roll)
 
 
 # --- SFX overrides ---

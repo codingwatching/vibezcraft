@@ -94,6 +94,12 @@ const FALL_DAMAGE_SAFE_BLOCKS: float = 3.0
 # allows STRONGER overlapping damage to still land within this window;
 # we keep it simple and fully ignore everything for now.)
 const DAMAGE_COOLDOWN_SEC: float = 1.0
+# hf.java:293-294 — hurtTime = maxHurtTime = 10 ticks. Drives the
+# camera flinch (kb.java:119-135) and the red model tint (ec.java:68-82).
+const HURT_DURATION_SEC: float = 0.5
+# kb.java:134 — the flinch peaks at 14° about an axis turned to face
+# the attacker.
+const _HURT_CAMERA_DEG: float = 14.0
 # Mob-hit knockback (vanilla hf.java EntityLiving: halve current motion,
 # then shove away from the attacker + a clamped upward pop). Magnitudes
 # match MobBase's own knockback so a hit feels symmetric between player
@@ -295,6 +301,11 @@ const SLEEP_WAKE_TICKS: float = 110.0
 const SLEEP_CAP_TICKS: float = 100.0
 var is_sleeping: bool = false
 var sleep_ticks: float = 0.0
+# Foot cell of the bed being slept in — the wake relocation searches
+# around it (Beta BlockBed.getNearestEmptyChunkCoordinates).
+var _sleep_foot_cell: Vector3i = Vector3i.ZERO
+# Top of the bed's collision box (mesher emits a 1 × 9/16 × 1 box).
+const _BED_TOP: float = 0.5625
 
 # F2 teleport pin-and-wait. The dungeon-finder spirals through
 # Worldgen.generate_chunk to LOCATE a spawner, but those throwaway
@@ -451,6 +462,18 @@ var _is_flying: bool = false
 # and apply the roll to the camera (first-person view tilts with the
 # falling head) and the character model (third-person body lies sideways).
 var _death_time_sec: float = 0.0
+# First-person view bob + hurt flinch (kb.java:119-151). The camera's
+# Euler rotation is owned by the look handlers (pitch in x, death tilt in
+# z), so these effects are folded in as offsets at the end of _process
+# and stripped again at the start of the next, leaving the look math
+# untouched in between.
+var _bob_distance: float = 0.0  # lw.java:362 distanceWalked (×0.6 per block)
+var _bob_amount: float = 0.0  # eb.java:74 cameraYaw — bob amplitude 0..0.1
+var _bob_pitch_deg: float = 0.0  # eb.java:75 cameraPitch — airborne tilt
+var _bob_last_pos: Vector3 = Vector3.ZERO
+var _hurt_time_sec: float = 0.0
+var _attacked_at_yaw: float = 0.0  # hf.java:307-310, radians, 90° = from the front
+var _camera_fx_applied: Vector2 = Vector2.ZERO  # (pitch, roll) currently folded in
 var _last_jump_press_time: float = -10.0
 # Water state between frames — `_was_in_water` drives the splash trigger
 # (vanilla Entity.N() fires on !inWater → inWater edge). `_swim_distance`
@@ -1302,6 +1325,25 @@ func _refresh_axe_tp_rotation() -> void:
 # animates regardless of what the player is standing in. Without the
 # water branch calling this, holding a pickaxe and mining underwater
 # left the tool static — only the bare-hand swing was applied.
+# Drive arm/leg animations: mining swing first (it owns the right arm
+# while active), then walking (which skips the right arm during the
+# swing). One entry point for every locomotion branch — ground, water,
+# flight — so no branch can leave the model frozen.
+func _drive_limb_animation(delta: float) -> void:
+	if _character_model == null or not _character_model.has_method("update_walk_animation"):
+		return
+	var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
+	var progress: float = _character_model.update_mining_swing(is_mining, delta)
+	var arm_locked: bool = _character_model.is_mining_visually()
+	_character_model.update_walk_animation(horiz_speed, delta, arm_locked)
+	if _camera != null and _character_model.has_method("set_look_pitch"):
+		var pitch: float = _camera.rotation.x - _camera_fx_applied.x
+		if perspective == PERSPECTIVE_THIRD_FRONT:
+			pitch = -pitch  # front mode stores the inverted pitch
+		_character_model.call("set_look_pitch", pitch)
+	_apply_swing_to_fp_props(progress)
+
+
 func _apply_swing_to_fp_props(progress: float) -> void:
 	if _fp_hand != null and _fp_hand.visible:
 		_apply_fp_swing(_fp_hand, _fp_hand_base_position, _fp_hand_base_rotation, progress)
@@ -1839,10 +1881,75 @@ func _update_debug_label() -> void:
 
 
 func _process(_delta: float) -> void:
+	_strip_camera_effects()
 	_update_camera_collision()
 	_tick_held_bow_stage()
 	_tick_sleep(_delta)
 	_poll_pad_look(_delta)
+	_apply_camera_effects(_delta)
+
+
+# Undo last frame's bob/flinch offsets so every look handler that runs
+# before _apply_camera_effects sees the true pitch and roll.
+func _strip_camera_effects() -> void:
+	if _camera == null:
+		return
+	_camera.rotation.x -= _camera_fx_applied.x
+	_camera.rotation.z -= _camera_fx_applied.y
+	_camera_fx_applied = Vector2.ZERO
+
+
+# kb.java:138-151 (setupViewBobbing) + kb.java:119-135 (hurtCameraEffect),
+# fed by eb.java:66-75's per-tick accumulators, scaled to frame time.
+# Neither existed here before: first person had no locomotion feedback
+# beyond footstep SFX, and a hit only flashed the HUD red (issue #7).
+func _apply_camera_effects(delta: float) -> void:
+	if _camera == null:
+		return
+	if health <= 0:
+		# The death tilt owns rotation.z until respawn.
+		return
+	# lw.java:362 — distanceWalked grows 0.6 per block of horizontal
+	# travel. Frame-delta rather than velocity so a teleport only shifts
+	# the phase (capped) instead of spinning the bob.
+	var moved: Vector3 = position - _bob_last_pos
+	_bob_last_pos = position
+	_bob_distance += minf(Vector2(moved.x, moved.z).length(), 1.0) * 0.6
+	# eb.java:66-75 — bob amplitude chases min(0.1, blocks/tick) while on
+	# the ground; the airborne pitch chases atan(-motionY·0.2)·15°. Both
+	# are per-tick exponential eases (0.4 / 0.8) converted to frame time.
+	var per_tick_speed: float = Vector2(velocity.x, velocity.z).length() / 20.0
+	var grounded: bool = is_on_floor()
+	var amount_target: float = minf(per_tick_speed, 0.1) if grounded else 0.0
+	var pitch_target: float = 0.0 if grounded else atan(-(velocity.y / 20.0) * 0.2) * 15.0
+	_bob_amount += (amount_target - _bob_amount) * (1.0 - pow(0.6, delta * 20.0))
+	_bob_pitch_deg += (pitch_target - _bob_pitch_deg) * (1.0 - pow(0.2, delta * 20.0))
+	var pitch_offset: float = 0.0
+	var roll_offset: float = 0.0
+	if perspective == PERSPECTIVE_FIRST:
+		# kb.java:147-150 — translate in VIEW space (sideways sway + a
+		# dip on each step), roll 3°·amp about the view axis, pitch
+		# 5°·amp, then the airborne tilt.
+		var t: float = _bob_distance * PI
+		var sway := Vector3(sin(t) * _bob_amount * 0.5, -absf(cos(t) * _bob_amount), 0.0)
+		_camera.position = _CAM_FIRST_PERSON + _camera.transform.basis * sway
+		roll_offset += deg_to_rad(sin(t) * _bob_amount * 3.0)
+		pitch_offset += deg_to_rad(absf(cos(t + 0.2) * _bob_amount) * 5.0 + _bob_pitch_deg)
+	# kb.java:119-135 — the flinch: rotate 14°·sin((t/max)⁴·π) about a
+	# horizontal axis turned to attackedAtYaw. Ry(-N)·Rz(-r)·Ry(N) is a
+	# rotation about (-sin N, 0, cos N) by -r; split into the camera's
+	# pitch and roll components: a frontal hit nods, a side hit tilts.
+	if _hurt_time_sec > 0.0:
+		_hurt_time_sec = maxf(0.0, _hurt_time_sec - delta)
+		var f: float = _hurt_time_sec / HURT_DURATION_SEC
+		var r: float = deg_to_rad(_HURT_CAMERA_DEG) * sin(f * f * f * f * PI)
+		pitch_offset += r * sin(_attacked_at_yaw)
+		roll_offset += -r * cos(_attacked_at_yaw)
+	if _character_model != null and _character_model.has_method("set_hurt_tint"):
+		_character_model.call("set_hurt_tint", _hurt_time_sec > 0.0)
+	_camera.rotation.x += pitch_offset
+	_camera.rotation.z += roll_offset
+	_camera_fx_applied = Vector2(pitch_offset, roll_offset)
 
 
 # Right-stick camera look — polled per rendered frame (matching the
@@ -1895,6 +2002,7 @@ func _tick_sleep(delta: float) -> void:
 			# time-skip; sleepTicks keeps counting up so the overlay
 			# fades back out gradually.
 			is_sleeping = false
+			_wake_up()
 		# Stay clamped at the cap while sleeping — matches vanilla
 		# `if (this.sleepTicks > 100) this.sleepTicks = 100`.
 		sleep_ticks = minf(sleep_ticks, SLEEP_CAP_TICKS)
@@ -1913,12 +2021,103 @@ func start_sleep(foot_cell: Vector3i) -> void:
 	is_sleeping = true
 	sleep_ticks = 0.0
 	velocity = Vector3.ZERO
-	# Lay the player on top of the bed's foot cell. Y offset +0.5 lines
-	# the capsule's bottom up with the bed's 9/16 top — close enough that
-	# the camera reads as "sitting on the bed" without per-half-block math.
+	# Lay the player on the bed's foot cell. This pose is a CAMERA pose,
+	# not a standing one: the capsule centre sits at cell + 0.5, which is
+	# 0.4 m into the floor and inside the bed's own 9/16 collision box.
+	# That is harmless while asleep because _physics_process returns
+	# before move_and_slide, but it is exactly the deep symmetric
+	# penetration that paralyses the body once physics resumes (same
+	# failure as the Nether arrival, see nether_teleporter.gd). So the
+	# player never stands up HERE — _wake_up relocates to a clear cell
+	# beside the bed, and the spawn point is that standing cell too.
+	_sleep_foot_cell = foot_cell
 	global_position = Vector3(foot_cell) + Vector3(0.5, 0.5, 0.5)
-	bed_spawn_pos = global_position
+	bed_spawn_pos = bed_wake_position(_chunk_manager_or_null(), foot_cell)
 	has_bed_spawn = true
+
+
+# Beta EntityHuman.wakeUp → BlockBed.getNearestEmptyChunkCoordinates:
+# stand the player up on a clear cell next to the bed. Field report
+# (issue #7): waking left the capsule buried in the floor under the bed,
+# soft-locking the player until they mined the ground out from under
+# themselves.
+func _wake_up() -> void:
+	global_position = bed_wake_position(_chunk_manager_or_null(), _sleep_foot_cell)
+	bed_spawn_pos = global_position
+	velocity = Vector3.ZERO
+	_fall_peak_y = global_position.y
+	_fall_immune_next_landing = true
+	# Re-arm the embed check as a backstop: if every candidate cell was
+	# blocked and we fell back to standing on the mattress under a low
+	# ceiling, the settle pass climbs us out rather than leaving us stuck.
+	_settled = false
+	_settle_remaining_frames = 60
+
+
+func _chunk_manager_or_null() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("Main/ChunkManager")
+
+
+# Where a player standing up from the bed at `foot_cell` should be put.
+# Port of Beta BlockBed.getNearestEmptyChunkCoordinates: scan the 3×3
+# around the foot, then the wider ring (which covers the head cell's own
+# 3×3 whichever way the bed faces), for a cell with a solid floor and two
+# clear cells above it. Falls back to standing ON the bed, as vanilla's
+# wakeUp does when the search returns null.
+#
+# Static + injected `world` (anything with get_world_block) so tests can
+# drive it with a fake chunk manager, same as the voxel floor guard.
+static func bed_wake_position(world: Object, foot_cell: Vector3i) -> Vector3:
+	if world != null and world.has_method("get_world_block"):
+		# The seed cell first: a bed foot can never pass (it is a bed), but
+		# the respawn sanitiser feeds an already-standing point through
+		# here and that must map to itself rather than drift a cell over.
+		if _is_standable_cell(world, foot_cell):
+			return _standing_position_in(foot_cell)
+		for radius: int in [1, 2]:
+			for dx: int in range(-radius, radius + 1):
+				for dz: int in range(-radius, radius + 1):
+					if radius > 1 and absi(dx) < radius and absi(dz) < radius:
+						continue
+					var cell: Vector3i = foot_cell + Vector3i(dx, 0, dz)
+					if _is_standable_cell(world, cell):
+						return _standing_position_in(cell)
+	# Nothing clear around the bed: stand on the mattress. The bed's box
+	# top is the floor here, so the origin rides above THAT, not the cell.
+	return Vector3(
+		float(foot_cell.x) + 0.5,
+		float(foot_cell.y) + _BED_TOP + _CAPSULE_HALF_HEIGHT + _VOXEL_FLOOR_SKIN,
+		float(foot_cell.z) + 0.5
+	)
+
+
+# The body origin is the capsule CENTRE, so standing in an air cell whose
+# floor is the cell's bottom face means origin = cell.y + half height +
+# skin — the 0.901 convention shared with the floor guard and the portal
+# arrival. cell + 0.5 would bury the capsule 0.4 m.
+static func _standing_position_in(cell: Vector3i) -> Vector3:
+	return Vector3(
+		float(cell.x) + 0.5,
+		float(cell.y) + _CAPSULE_HALF_HEIGHT + _VOXEL_FLOOR_SKIN,
+		float(cell.z) + 0.5
+	)
+
+
+# Solid floor underneath, and neither the cell nor the one above blocks
+# the capsule. Bed halves are excluded explicitly: Blocks.is_solid_collision
+# says no for them (they are not full cubes) but the mesher emits a
+# 9/16-tall collision box, so "standing" in one wedges the capsule.
+static func _is_standable_cell(world: Object, cell: Vector3i) -> bool:
+	var below: int = world.get_world_block(cell + Vector3i(0, -1, 0))
+	if not Blocks.is_solid_collision(below):
+		return false
+	for up: int in [0, 1]:
+		var id: int = world.get_world_block(cell + Vector3i(0, up, 0))
+		if Blocks.is_solid_collision(id) or id == Blocks.BED_FOOT or id == Blocks.BED_HEAD:
+			return false
+	return true
 
 
 # Polls the Interaction node's bow charge and swaps the held-bow
@@ -2260,6 +2459,11 @@ func _physics_process(delta: float) -> void:
 		_update_flight_physics()
 		_report_block_contact()
 		move_and_slide()
+		# Flight used to return before the animation drive, so the limbs
+		# froze mid-pose and no swing played for a block broken or a mob
+		# hit while airborne (issue #7). Same cycle as the ground: the
+		# legs stride with horizontal speed.
+		_drive_limb_animation(delta)
 		# Airborne — no footstep cadence, no fall tracking while flying.
 		# (fall tracking is disarmed because _is_flying disables gravity and
 		# we reset _fall_peak_y below so we don't take phantom damage when
@@ -2329,11 +2533,7 @@ func _physics_process(delta: float) -> void:
 		# Keep walk animation running while swimming — Alpha had no
 		# dedicated swim pose (introduced in 1.13); Steve's limbs used the
 		# normal walk cycle in water. Mining swing still takes priority.
-		if _character_model != null and _character_model.has_method("update_walk_animation"):
-			var progress: float = _character_model.update_mining_swing(is_mining, delta)
-			var arm_locked: bool = _character_model.is_mining_visually()
-			_character_model.update_walk_animation(horiz_speed, delta, arm_locked)
-			_apply_swing_to_fp_props(progress)
+		_drive_limb_animation(delta)
 		_fall_peak_y = global_position.y
 		_was_on_floor = false
 		return
@@ -2386,14 +2586,7 @@ func _physics_process(delta: float) -> void:
 	else:
 		_step_distance = 0.0  # reset mid-jump so we don't fire on landing
 
-	# Drive arm/leg animations: mining swing first (it owns the right arm while
-	# active), then walking (which skips the right arm during the swing).
-	if _character_model != null and _character_model.has_method("update_walk_animation"):
-		var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
-		var progress: float = _character_model.update_mining_swing(is_mining, delta)
-		var arm_locked: bool = _character_model.is_mining_visually()
-		_character_model.update_walk_animation(horiz_speed, delta, arm_locked)
-		_apply_swing_to_fp_props(progress)
+	_drive_limb_animation(delta)
 
 	if on_ladder:
 		_fall_peak_y = global_position.y
@@ -2532,6 +2725,22 @@ func take_damage(
 		_damage_armor(amount)
 	health = maxi(0, health - final_amount)
 	_damage_cooldown_remaining = DAMAGE_COOLDOWN_SEC
+	# hf.java:293-310 — arm the flinch. attackedAtYaw is the attacker's
+	# bearing relative to the facing (90° = straight ahead → a nod, 0 or
+	# 180 = a side hit → a roll); damage with no attacker rolls to a
+	# random side.
+	_hurt_time_sec = HURT_DURATION_SEC
+	if knockback_dir.length_squared() > 0.0001:
+		# knockback_dir points attacker → player, so the attacker sits the
+		# other way; express that in the body's frame (forward = -Z).
+		# Body-local basis: the player is a direct child of Main, which
+		# carries no rotation, and this must also work off-tree in tests.
+		var local: Vector3 = (
+			transform.basis.inverse() * Vector3(-knockback_dir.x, 0.0, -knockback_dir.z)
+		)
+		_attacked_at_yaw = atan2(-local.z, local.x)
+	else:
+		_attacked_at_yaw = PI if randi() % 2 == 0 else 0.0
 	# Vanilla knockback (hf.java:350) — only reached on a real hit (the
 	# iframe gate above already returned for blocked ones). Halve current
 	# horizontal motion then add a shove away from the attacker; halve
@@ -2648,6 +2857,16 @@ func _safe_spawn_position() -> Vector3:
 # an infinite loop.
 func _teleport_to_safe_spawn() -> void:
 	safe_teleport(_safe_spawn_position())
+	if has_bed_spawn:
+		# Saves written before the wake fix hold the SLEEP pose as the
+		# spawn point (capsule centre at cell + 0.5, buried in the floor).
+		# The chunks are resident now, so resolve it to a standing cell
+		# the same way waking does; an already-standing point maps to
+		# itself.
+		var seed_cell := Vector3i(
+			floori(global_position.x), floori(global_position.y), floori(global_position.z)
+		)
+		global_position = bed_wake_position(_chunk_manager_or_null(), seed_cell)
 
 
 # Sync-load the 3×3 chunk neighborhood around `pos` THEN move the
@@ -2831,11 +3050,15 @@ func _respawn() -> void:
 	# read back wrong. Y (yaw vs perspective) is preserved by setting
 	# only X/Z to zero.
 	_death_time_sec = 0.0
+	_hurt_time_sec = 0.0
+	_camera_fx_applied = Vector2.ZERO
 	if _camera != null:
 		_camera.rotation.x = 0.0
 		_camera.rotation.z = 0.0
 	if _character_model != null:
 		_character_model.rotation.z = 0.0
+		if _character_model.has_method("set_hurt_tint"):
+			_character_model.call("set_hurt_tint", false)
 		if _character_model.has_method("set_on_fire"):
 			_character_model.call("set_on_fire", false)
 	health_changed.emit(health, MAX_HEALTH)

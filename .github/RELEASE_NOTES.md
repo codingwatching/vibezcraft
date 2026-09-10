@@ -1,27 +1,23 @@
-# VibezCraft 1.1.0
+# VibezCraft 1.1.1
 
-VibezCraft 1.1.0 adds two major parts of classic Minecraft: the Nether and Alpha-style redstone. It also includes the redstone repeater from Beta 1.3, new ways to play, and a collection of gameplay and performance improvements.
+A bug-fix release. Everything here came from one very thorough bug report (issue #7) — thanks, Oelda. Worlds from 1.1.0 still work.
 
-## The Nether
+## Fixes
 
-- Build and light an obsidian portal to travel between the Overworld and the Nether. Distance is scaled at the classic 8:1 ratio.
-- Explore a new dimension with caves, lava seas, a bedrock roof, and its own lighting and fog. Netherrack, soul sand, and glowstone can all be collected and used.
-- Meet zombie pigmen and ghasts. Pigmen fight as a group when attacked, while ghasts shoot fireballs that can be knocked back at them.
-- The Nether follows its familiar rules: water evaporates, beds cannot be used, lava spreads farther, and fire burns forever on netherrack.
-- Each dimension keeps its own blocks, mobs, dropped items, and portal locations. The Nether also includes its original Alpha sounds, particles, and portal effects.
+- **Beds.** Waking up no longer leaves you stuck in the floor. You stand up next to the bed, and respawning at a bed puts you on your feet too.
+- **Nether portals.** The obsidian frame around the portal now shows up, and is solid, when you arrive in the Nether. It was there all along, but the chunk was drawn from an older copy.
+- **Furnaces.** The front is only on the side you were facing when you placed it, and stays put when the furnace lights. Pumpkins and jack-o'-lanterns had the same problem and are fixed too. Furnaces placed before this update face north; break and replace them if you mind. The top and bottom now use the stone texture, as in Alpha.
+- **Furnace screen.** Opening a fresh furnace no longer shows a stretched flame and arrow.
+- **Cactus.** No longer see-through at the edges. It has the classic narrower shape and hitbox.
+- **Ore in caves.** Coal and other ore no longer sits in mid-air inside caves. Caves are now carved before ore is placed, the way the original game does it.
+- **Water.** Picking up or breaking a water source now drains all the water it was feeding, not just the nearest blocks.
+- **Skeletons.** They aim at your body instead of your feet, so they hit far more often, especially when you are standing above them. Arrows also connect a little more generously, matching the original game.
+- **Spiders.** No longer float above the ground.
+- **Inventory.** Items move the moment you click, not when you let go. Holding a stack and dragging it across slots splits it as you go.
+- **Animations.** Walking looks like walking again. Punching the air swings your arm. The view bobs as you walk in first person, the screen flinches and your character flashes red when hurt, and flying no longer freezes the arms and legs.
+- **Character preview.** The head in the inventory screen sits on the neck instead of drifting off it.
+- **Gaps between chunks.** Thin lines of sky showing between blocks on some graphics cards should be gone. We could not make it happen on a Mac, so if you still see it after updating, please say so.
 
-## Redstone
+## For bug reports
 
-- Redstone ore now generates underground and drops dust when mined with an iron or better pickaxe. Redstone wire carries a weakening signal across blocks and chunk borders.
-- Build circuits with levers, buttons, pressure plates, and redstone torches. Use them to control doors, TNT, and rail junctions.
-- Craft redstone repeaters to extend a signal at full strength. Repeaters accept power from the back, send it through the front, and have four delay settings.
-- Redstone circuits keep their state when a world is saved and loaded. Their updates have also been tuned to keep larger builds running smoothly.
-
-## Other changes
-
-- Added controller support with separate remapping for controller and keyboard inputs. Web builds also support touch controls and phone-friendly settings.
-- Added **Pause → Options → Unstuck / Debug**, where you can teleport safely back to spawn or copy a debug log for a bug report. The game can also recover the player from several fall-through and stuck-block problems.
-- Spiders can climb walls, sand and gravel fall properly, and combat now has improved knockback and damage feedback.
-- Lighting, fog, clouds, particles, mob rendering, chunk borders, and held items now look more consistent with the Alpha style.
-- Saving, chunk loading, mob behavior, explosions, redstone, and Nether generation received performance and reliability improvements. Dropped items also react properly to fire, lava, and water.
-- Worlds from 1.0.1 remain compatible. The macOS download is signed and notarized, and Windows is available as an installer or portable download.
+If the game slows down badly for more than a couple of seconds, it now writes a line to the log saying what was going on at the time. You can copy it from **Pause → Options → Unstuck / Debug**. Please include it if you report lag.

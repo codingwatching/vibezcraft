@@ -12,10 +12,17 @@ extends TextureRect
 # it (e.g. attach an armor mesh, set head rotation).
 
 const PREVIEW_PX: int = 256
+# ne.java's cursor reference point inside this 50×70 GUI rectangle, and
+# the model's feet in its own frame (origin = capsule centre). See
+# _apply_mouse_tracking.
+const _REFERENCE_GUI := Vector2(24.0, 17.0)
+const _FEET := Vector3(0.0, -0.9, 0.0)
 
 static var _viewport: SubViewport
 static var _model: Node3D
 static var _held_mesh: Node3D  # preview's right-hand item (pivot root)
+# Screen pixels per GUI unit of the panel this preview is drawn on.
+var gui_scale: float = 1.0
 
 
 func _ready() -> void:
@@ -32,32 +39,50 @@ func _process(_delta: float) -> void:
 	_apply_mouse_tracking()
 
 
-# Vanilla GuiInventory.drawEntityOnScreen math. Applied directly — the
-# preview camera is at -Z looking at +Z, and Godot's right-handed view
-# basis puts world -X on the viewer's right. So a positive rotation.y
-# (forward -Z → -X) turns the model to face the viewer's right, which
-# is exactly where "mouse right" lives. No sign flip needed.
+# Vanilla ne.java:60-76 (GuiInventory.drawPlayerOnGui). The preview
+# camera is at -Z looking at +Z, and Godot's right-handed view basis puts
+# world -X on the viewer's right, so a positive yaw turns the model
+# toward "mouse right" with no sign flip.
 #
-#   body yaw  = atan(dx / 40) × 20°    (max ~±31° at the edges)
-#   head yaw  = body yaw + atan(dx / 40) × 20°  (head turns ~2× body)
-#   pitch     = atan(dy / 40) × 20°     (screen-down → head looks down)
+# All of it is in GUI units — vanilla measures the cursor in its scaled
+# GUI coordinates, not screen pixels. This control is drawn at
+# `gui_scale`× (5 on the inventory panel), and the earlier port fed raw
+# pixels into atan(d / 40), so the head hit its ±31° cap a fifth of the
+# way to the edge and sat pinned there (issue #7 "head detached").
+#   reference = the point vanilla measures from: 51 px right of the
+#               panel's left edge and 25 down — about head height —
+#               i.e. (24, 17) inside this 50×70 rectangle
+#   body yaw  = atan(dx / 40) × 20°
+#   head yaw  = body yaw + atan(dx / 40) × 20°  (head turns 2× body)
+#   pitch     = atan(dy / 40) × 20°, applied TWICE: once as a lean of the
+#               whole body about its feet (ne.java:71 glRotatef before
+#               the render), once as the head's own pitch (ne.java:74)
 func _apply_mouse_tracking() -> void:
 	if _model == null or not is_visible_in_tree():
 		return
-	var rect_center: Vector2 = global_position + size * 0.5
-	var mouse: Vector2 = get_global_mouse_position()
-	var dx: float = mouse.x - rect_center.x  # +ve = mouse on viewer's RIGHT
-	var dy: float = mouse.y - rect_center.y  # +ve = mouse BELOW center
-	var body_yaw_rad: float = atan(dx / 40.0) * 20.0 * PI / 180.0
-	var head_extra_yaw_rad: float = atan(dx / 40.0) * 20.0 * PI / 180.0
-	# Pitch: positive head.rotation.x tilts the face UP in Godot; mouse
-	# above center → dy negative → negate to get positive pitch.
-	var pitch_rad: float = -atan(dy / 40.0) * 20.0 * PI / 180.0
-	_model.rotation.y = body_yaw_rad
+	var mouse_gui: Vector2 = (get_global_mouse_position() - global_position) / gui_scale
+	var pose: Dictionary = tracking_pose(mouse_gui)
+	# Lean the yawed body toward/away from the viewer about its FEET, in
+	# the screen's frame (lean outermost), as ne.java's glRotatef does
+	# around the model's base translate point.
+	var basis: Basis = Basis(Vector3.RIGHT, pose.pitch) * Basis(Vector3.UP, pose.body_yaw)
+	_model.transform = Transform3D(basis, _FEET - basis * _FEET)
 	var head: Node3D = _model.get("head") as Node3D
 	if head != null:
-		head.rotation.y = head_extra_yaw_rad
-		head.rotation.x = pitch_rad
+		head.rotation.y = pose.head_yaw
+		head.rotation.x = pose.pitch
+
+
+# The three angles ne.java derives from a cursor position given in GUI
+# units relative to this rectangle's top-left. Pure, for the tests.
+static func tracking_pose(mouse_gui: Vector2) -> Dictionary:
+	var dx: float = mouse_gui.x - _REFERENCE_GUI.x  # +ve = mouse on viewer's RIGHT
+	var dy: float = mouse_gui.y - _REFERENCE_GUI.y  # +ve = mouse BELOW the reference
+	var yaw: float = atan(dx / 40.0) * 20.0 * PI / 180.0
+	# Positive X rotation tilts a -Z-facing face UP; mouse above the
+	# reference → dy negative → negate to get positive pitch.
+	var pitch: float = -atan(dy / 40.0) * 20.0 * PI / 180.0
+	return {"body_yaw": yaw, "head_yaw": yaw, "pitch": pitch}
 
 
 # Build the offscreen viewport + character model. Call once at boot from

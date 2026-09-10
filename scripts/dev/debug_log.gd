@@ -24,6 +24,7 @@ const STUCK: String = "STUCK"  # embedded in solid -> unstuck
 const CHUNK: String = "CHUNK"  # missing / corrupt / regenerated chunk
 const GROUND: String = "GROUND"  # no live collision under player (fall-through precursor)
 const TP: String = "TP"  # manual Teleport to Spawn
+const PERF: String = "PERF"  # sustained low frame rate (see PerfWatchdog)
 
 static var _entries: Array[String] = []
 static var _start_ticks_msec: int = 0

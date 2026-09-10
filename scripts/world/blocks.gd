@@ -644,6 +644,18 @@ const MESH_SHAPE_NONE: int = 19
 # two small redstone torches. Metadata controls facing + adjustable-torch
 # position; the block ID selects lit versus unlit art.
 const MESH_SHAPE_REDSTONE_REPEATER: int = 20
+# A full cube whose four side textures depend on the stored facing
+# (furnace family, pumpkin family). Geometrically identical to
+# MESH_SHAPE_CUBE, but routed through the special-cell appendix because
+# the native cube pass reads the flat per-id UV table and cannot pick a
+# side texture from metadata — it drew the furnace front (and the
+# carved pumpkin face) on all four sides. See mesher._emit_special_cell.
+const MESH_SHAPE_DIRECTIONAL_CUBE: int = 21
+# je.java render type 13 — top and bottom are full 1×1 faces, the four
+# sides are full faces pushed 1/16 in along their normal. The side
+# texture's outer columns are transparent spines, so a flush cube showed
+# a see-through slit down every edge.
+const MESH_SHAPE_CACTUS: int = 22
 
 # --- Content registry (docs/nether-alpha-1.2.6-implementation-plan.md §3.1) ---
 #
@@ -1716,6 +1728,10 @@ static func collision_aabb(id: int, meta: int = 0) -> AABB:
 		return AABB(Vector3.ZERO, Vector3.ZERO)  # x.java:12-13
 	if id == SOUL_SAND:
 		return AABB(Vector3.ZERO, Vector3(1.0, 0.875, 1.0))  # it.java:10-12
+	if id == CACTUS:
+		# je.java:32-35 `d()` — sides in 1/16 AND the top at 15/16, so an
+		# entity brushing a cactus overlaps the spines (contact damage).
+		return AABB(Vector3(0.0625, 0.0, 0.0625), Vector3(0.875, 0.9375, 0.875))
 	if not is_solid_collision(id):
 		return AABB(Vector3.ZERO, Vector3.ZERO)
 	return selection_aabb(id, meta)
@@ -1759,6 +1775,9 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# The base Block bounds remain a full cube. `it.java` overrides only
 		# the entity-collision box (`d`), not selection/ray bounds.
 		return AABB(Vector3.ZERO, Vector3.ONE)
+	if id == CACTUS:
+		# je.java:37-40 `f()` — sides pulled in 1/16, full height.
+		return AABB(Vector3(0.0625, 0.0, 0.0625), Vector3(0.875, 1.0, 0.875))
 	if id == PORTAL:
 		# Orientation needs neighbour state and is resolved by the mesher and
 		# Interaction. This is x.java's isolated-cell/Z-axis fallback.
@@ -2014,6 +2033,10 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_PRESSURE_PLATE
 	if id == REDSTONE_REPEATER_OFF or id == REDSTONE_REPEATER_ON:
 		return MESH_SHAPE_REDSTONE_REPEATER
+	if has_directional_face(id):
+		return MESH_SHAPE_DIRECTIONAL_CUBE
+	if id == CACTUS:
+		return MESH_SHAPE_CACTUS
 	if id == PORTAL:
 		# Falling through to CUBE here gave the portal solid geometry AND
 		# chunk collision — the player could never step into one, which
@@ -2833,10 +2856,25 @@ static func name_of(id: int) -> String:
 # Returns the texture name for a given block face. face ∈ {"top", "bottom", "side"}
 # Blocks whose 4 side faces aren't identical — the mesher pulls per-face
 # textures via directional_face_texture below instead of the
-# get_face_texture(id, "side") fast path. Currently pumpkin family;
-# future furnace meta-aware front face, beds, etc. would extend this.
+# get_face_texture(id, "side") fast path. Pumpkin and furnace families.
+# Every id here is MESH_SHAPE_DIRECTIONAL_CUBE (see mesh_shape), which is
+# what keeps it out of the native cube pass.
 static func has_directional_face(id: int) -> bool:
-	return id == PUMPKIN or id == JACK_O_LANTERN
+	return id == PUMPKIN or id == JACK_O_LANTERN or id == FURNACE or id == LIT_FURNACE
+
+
+# Facing meta shared by every directional cube, the chest convention:
+# 0 = -Z (north), 1 = -X (west), 2 = +Z (south), 3 = +X (east). Maps to
+# the mesher's face index (2=+X, 3=-X, 4=+Z, 5=-Z).
+static func directional_front_face_idx(meta: int) -> int:
+	match meta & 3:
+		1:
+			return 3
+		2:
+			return 4
+		3:
+			return 2
+	return 5
 
 
 # Per-face texture for directional blocks. `face_idx` is the mesher's
@@ -2848,21 +2886,20 @@ static func directional_face_texture(id: int, face_idx: int, meta: int) -> Strin
 		# Top + bottom share the stem texture regardless of meta.
 		if face_idx == 0 or face_idx == 1:
 			return "pumpkin_top"
-		# Map the stored meta to the face_idx of the side it faces.
-		# Inverse of the table in _chest_meta_from_yaw / pumpkin placement.
-		var front_face_idx: int = 5  # default -Z when meta=0
-		match meta:
-			0:
-				front_face_idx = 5  # -Z (north)
-			1:
-				front_face_idx = 3  # -X (west)
-			2:
-				front_face_idx = 4  # +Z (south)
-			3:
-				front_face_idx = 2  # +X (east)
-		if face_idx == front_face_idx:
+		if face_idx == directional_front_face_idx(meta):
 			return "jack_o_lantern_face" if id == JACK_O_LANTERN else "pumpkin_face"
 		return "pumpkin_side"
+	if id == FURNACE or id == LIT_FURNACE:
+		# mj.java:60-71 — top and bottom are `nq.t` (STONE)'s texture in
+		# Alpha; the dedicated furnace-top tile is a later-version look.
+		# The front goes on the one side the stored facing names, every
+		# other side is the plain furnace side (issue #7: the front used
+		# to be on all four).
+		if face_idx == 0 or face_idx == 1:
+			return "stone"
+		if face_idx == directional_front_face_idx(meta):
+			return "furnace_front_lit" if id == LIT_FURNACE else "furnace_front"
+		return "furnace_side"
 	# Fallback for any future directional block that hits this path without
 	# a special-case branch — render side as if it were non-directional.
 	return get_face_texture(id, "side")

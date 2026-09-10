@@ -144,15 +144,28 @@ const _ARMOR_LEG_UVS: Array[Rect2] = [
 	Rect2(0.0625, 0.625, 0.0625, 0.375),  # front: (4, 20, 4, 12)
 ]
 
-const WALK_SWING_DEG: float = 38.0
-# Tuned so a full stride cycle at WALK_SPEED (4.317 m/s) is ≈1.5 Hz — matches
-# vanilla MC's leg-swing rhythm. Higher values = faster jittery limbs.
-const WALK_FREQUENCY: float = 0.35  # cycles per second per m/s of speed
+# Walk cycle — a port of dc.java:66-71 (ModelBiped.setRotationAngles)
+# driven by hf.java:455-460's accumulators:
+#   limbSwingAmount W ← eased 0.4/tick toward min(1, 4 × blocks/tick)
+#   limbSwing       X += W every tick
+#   arms  = cos(X · 0.6662 [+ π]) · 1.0 · W   (radians)
+#   legs  = cos(X · 0.6662 [+ π]) · 1.4 · W
+# At walk speed W ≈ 0.86, so legs reach ≈70° and arms ≈50° at ≈1.85 Hz.
+# The previous hand-tuned 38° / 1.5 Hz sine was about half of that and
+# read as "no walking animation" (issue #7).
+const WALK_PHASE_PER_LIMB_SWING: float = 0.6662
+const WALK_ARM_AMPLITUDE: float = 1.0
+const WALK_LEG_AMPLITUDE: float = 1.4
+const WALK_AMOUNT_EASE_PER_TICK: float = 0.4
 const RETURN_TO_REST_RATE: float = 10.0  # ease back to neutral when stopped
 const MINING_SWING_DEG: float = 50.0
-# Vanilla MC plays a fixed 6-tick (0.3s) swing cycle. Mid-swing release lets
-# the current cycle complete (no instant snap-back to rest).
-const SWING_DURATION_SEC: float = 0.30
+# eb.java:45-55 — the swing counter runs 0..8 ticks (0.4 s) and the
+# progress the arm animates from is k / 8. Mid-swing release lets the
+# current cycle complete (no instant snap-back to rest).
+const SWING_DURATION_SEC: float = 8.0 / 20.0
+# ec.java:68-82 — while hurtTime > 0 the model is drawn again with a
+# 0.4-alpha red pass. Same look as MobBase._apply_hurt_flash.
+const HURT_TINT := Color(1.0, 0.6, 0.6, 1.0)
 
 # Third-person fire rendering. Vanilla Render.renderEntityOnFire
 # (Render.java) draws animated fire quads around the entity AABB when
@@ -165,7 +178,11 @@ const _FIRE_STRIP_FRAMES: int = 32
 const _FIRE_STRIP_CELL_PX: int = 16
 const _FIRE_ANIM_FPS: float = 24.0
 
-var head: MeshInstance3D
+# Neck pivot (dc.java:26-27: the head cube is (-4,-8,-4)..(4,0,4) about a
+# rotation point at the neck, so it nods and turns from its BASE). The
+# mesh hangs off this pivot; rotate `head`, never `head_mesh`.
+var head: Node3D
+var head_mesh: MeshInstance3D
 var body: MeshInstance3D
 var arm_l: Node3D
 var arm_r: Node3D
@@ -185,8 +202,13 @@ var _armor_leg_r_upper: MeshInstance3D  # leggings
 var _armor_leg_l_lower: MeshInstance3D  # boots
 var _armor_leg_r_lower: MeshInstance3D  # boots
 var _armor_mat_cache: Dictionary = {}  # path -> StandardMaterial3D
-var _walk_phase: float = 0.0
+# hf.java's X (limbSwing) and W (limbSwingAmount), plus the age counter
+# dc.java:130-133 uses for the idle arm sway.
+var _limb_swing: float = 0.0
+var _limb_amount: float = 0.0
+var _age_ticks: float = 0.0
 var _swing_progress: float = 0.0  # 0..1 within the current swing cycle
+var _hurt_tinted: bool = false
 # Mounted-pose flag — when true the legs lock into a sitting bend at
 # the hip (~90° forward). update_walk_animation skips its leg writes
 # while this is true so the pose stays put. Player.set_mount toggles it.
@@ -215,33 +237,66 @@ func _ready() -> void:
 
 
 func update_walk_animation(speed: float, delta: float, skip_right_arm: bool = false) -> void:
+	_age_ticks += delta * 20.0
+	# hf.java:455-460, converted from per-tick to per-second: the eased
+	# amount chases min(1, 4 × blocks-per-tick), and the swing phase
+	# accumulates the amount once per tick.
+	var target_amount: float = minf(1.0, speed / 20.0 * 4.0)
+	_limb_amount += (
+		(target_amount - _limb_amount) * (1.0 - pow(1.0 - WALK_AMOUNT_EASE_PER_TICK, delta * 20.0))
+	)
+	_limb_swing += _limb_amount * delta * 20.0
+	var phase: float = _limb_swing * WALK_PHASE_PER_LIMB_SWING
+	# dc.java:66-71 — right arm and left leg share cos(phase + π), left
+	# arm and right leg share cos(phase). Expressed through one stride
+	# term so the cross-stride pairing is explicit.
+	var stride: float = -cos(phase) * _limb_amount
+	# dc.java:130-133 — idle sway: arms held a little away from the body
+	# and drifting slowly, so a standing player is never a statue.
+	var sway_z: float = cos(_age_ticks * 0.09) * 0.05 + 0.05
+	var sway_x: float = sin(_age_ticks * 0.067) * 0.05
 	# Mounted-pose lock: legs are pinned forward to the sitting bend,
 	# so we don't overwrite their rotation each frame. Arms still relax
 	# / swing normally (vanilla rider's arms stay free while seated).
 	if _mounted_pose:
-		var t_arm: float = clampf(delta * RETURN_TO_REST_RATE, 0.0, 1.0)
 		if not skip_right_arm:
-			arm_r.rotation.x = lerpf(arm_r.rotation.x, 0.0, t_arm)
-		arm_l.rotation.x = lerpf(arm_l.rotation.x, 0.0, t_arm)
-		_walk_phase = 0.0
+			arm_r.rotation.x = stride * WALK_ARM_AMPLITUDE + sway_x
+			arm_r.rotation.z = sway_z
+		arm_l.rotation.x = -stride * WALK_ARM_AMPLITUDE - sway_x
+		arm_l.rotation.z = -sway_z
 		return
-	if speed > 0.4:
-		_walk_phase += delta * (speed * WALK_FREQUENCY * TAU)
-		var swing: float = sin(_walk_phase) * deg_to_rad(WALK_SWING_DEG)
-		# Arms and legs cross-stride: right arm forward when left leg forward
-		if not skip_right_arm:
-			arm_r.rotation.x = swing
-		arm_l.rotation.x = -swing
-		leg_r.rotation.x = -swing
-		leg_l.rotation.x = swing
-	else:
-		var t: float = clampf(delta * RETURN_TO_REST_RATE, 0.0, 1.0)
-		if not skip_right_arm:
-			arm_r.rotation.x = lerpf(arm_r.rotation.x, 0.0, t)
-		arm_l.rotation.x = lerpf(arm_l.rotation.x, 0.0, t)
-		leg_r.rotation.x = lerpf(leg_r.rotation.x, 0.0, t)
-		leg_l.rotation.x = lerpf(leg_l.rotation.x, 0.0, t)
-		_walk_phase = 0.0
+	if not skip_right_arm:
+		arm_r.rotation.x = stride * WALK_ARM_AMPLITUDE + sway_x
+		arm_r.rotation.z = sway_z
+	arm_l.rotation.x = -stride * WALK_ARM_AMPLITUDE - sway_x
+	arm_l.rotation.z = -sway_z
+	leg_r.rotation.x = -stride * WALK_LEG_AMPLITUDE
+	leg_l.rotation.x = stride * WALK_LEG_AMPLITUDE
+
+
+# dc.java:62-63 — the head follows the look every frame. The body already
+# carries the yaw (the player node rotates with the mouse), so only the
+# pitch is left for the neck. Sign: a positive X rotation lifts a
+# -Z-facing face, and the camera's pitch is positive looking up.
+func set_look_pitch(pitch: float) -> void:
+	if head != null:
+		head.rotation.x = pitch
+
+
+# ec.java:68-82's red overlay pass, collapsed onto the skin material the
+# same way MobBase does it. Player.take_damage toggles it for hurtTime.
+func set_hurt_tint(on: bool) -> void:
+	if _hurt_tinted == on or _skin_mat == null:
+		return
+	_hurt_tinted = on
+	if _chunk_manager_ref != null:
+		_last_brightness = -1.0  # force the brightness pass to re-apply
+		_update_world_brightness()
+		return
+	var tint := Color.WHITE * HURT_TINT if on else Color.WHITE
+	_skin_mat.albedo_color = tint
+	for mat: StandardMaterial3D in _armor_mat_cache.values():
+		mat.albedo_color = tint
 
 
 # Toggle the seated pose — both legs bent forward ~80° at the hip so
@@ -464,9 +519,13 @@ func _build_skin_material() -> StandardMaterial3D:
 func _build_parts() -> void:
 	# Capsule center is at this Node3D's origin (y=0). Capsule extends -0.9..+0.9.
 	# Vertical layout: feet @ -0.9, leg/body junction @ -0.15, body top @ 0.6, head top @ 1.1.
-	head = _build_textured_box(Vector3(0.5, 0.5, 0.5), _HEAD_UVS)
-	head.position = Vector3(0, 0.85, 0)
+	head = Node3D.new()
+	head.name = "Head"
+	head.position = Vector3(0, 0.6, 0)  # body top = neck
 	add_child(head)
+	head_mesh = _build_textured_box(Vector3(0.5, 0.5, 0.5), _HEAD_UVS)
+	head_mesh.position = Vector3(0, 0.25, 0)  # cube centre, 0.85 in model space
+	head.add_child(head_mesh)
 
 	body = _build_textured_box(Vector3(0.5, 0.75, 0.25), _BODY_UVS)
 	body.position = Vector3(0, 0.225, 0)
@@ -493,7 +552,7 @@ func _build_parts() -> void:
 # inherit walk / swing rotations automatically. Kept hidden until
 # update_armor() is called with a non-empty stack in the relevant slot.
 func _build_armor_overlays() -> void:
-	_armor_head = _build_armor_box(head, Vector3(0.5, 0.5, 0.5), Vector3.ZERO, _ARMOR_HEAD_UVS)
+	_armor_head = _build_armor_box(head_mesh, Vector3(0.5, 0.5, 0.5), Vector3.ZERO, _ARMOR_HEAD_UVS)
 	_armor_body = _build_armor_box(body, Vector3(0.5, 0.75, 0.25), Vector3.ZERO, _ARMOR_BODY_UVS)
 	# Arm overlays parent to the same anchor node the skinned arm hangs
 	# from, positioned at the arm's center (same -size.y/2 offset).
@@ -758,6 +817,8 @@ func _update_world_brightness() -> void:
 		return  # imperceptible drift, skip the material write
 	_last_brightness = lit
 	var tint := Color(lit, lit, lit, 1.0)
+	if _hurt_tinted:
+		tint *= HURT_TINT
 	if _skin_mat != null:
 		_skin_mat.albedo_color = tint
 	for mat: StandardMaterial3D in _armor_mat_cache.values():

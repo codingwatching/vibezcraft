@@ -44,6 +44,9 @@ const _SPRITE_TIP_PX_X: float = 6.0
 const _SPRITE_TIP_PX_Y: float = 5.0
 const _PIXEL_SCALE: float = 0.03  # 16-px diagonal sprite ≈ 0.5 m arrow
 
+# Shared query shape for the grown-box entity pass (see _sweep_grown_entity_hit).
+static var _grown_hit_shape: BoxShape3D = null
+
 var _velocity: Vector3 = Vector3.ZERO
 var _stuck: bool = false
 var _spawn_time: float = 0.0
@@ -336,14 +339,32 @@ func _sweep_entity_hit(from: Vector3, to: Vector3) -> bool:
 			_shooter_exclude_cached = true
 		query.exclude = _shooter_exclude_rids
 	var result: Dictionary = space.intersect_ray(query)
-	if result.is_empty():
-		return false
-	var node: Node = result.get("collider") as Node
-	# Capture the exact intersection point on the hit collider's surface.
-	# Passed through to _hit_mob → mob.add_stuck_arrow so the visible
-	# stuck arrow lands AT the actual impact pose (head-shot looks like a
-	# head-shot) instead of an RNG-random spot on the body.
-	var hit_pos: Vector3 = result.get("position", to) as Vector3
+	# Vanilla lv.java:118-125 clips the flight segment to the first BLOCK
+	# hit, then tests every living entity's bounding box GROWN by 0.3 on
+	# each axis against that segment. The exact ray above only reports a
+	# hit when the centre line passes through the collider itself, which
+	# halves the effective target width (0.6 m vs vanilla's 1.2 m) and is
+	# most of why skeleton volleys felt like they missed constantly. So:
+	# exact ray first (it gives a precise impact point for the stuck-arrow
+	# pose), and when that finds no entity, the grown-box pass below.
+	var segment_end: Vector3 = to
+	if not result.is_empty():
+		var node: Node = result.get("collider") as Node
+		# Capture the exact intersection point on the hit collider's
+		# surface. Passed through to _hit_mob → mob.add_stuck_arrow so the
+		# visible stuck arrow lands AT the actual impact pose (head-shot
+		# looks like a head-shot) instead of an RNG-random spot on the body.
+		var hit_pos: Vector3 = result.get("position", to) as Vector3
+		if _hit_entity_ancestor(node, hit_pos):
+			return true
+		# A block: nothing behind it is reachable this step.
+		segment_end = hit_pos
+	return _sweep_grown_entity_hit(space, from, segment_end, query.exclude)
+
+
+# Walk up from a collider to the entity that owns it and apply the hit.
+func _hit_entity_ancestor(start: Node, hit_pos: Vector3) -> bool:
+	var node: Node = start
 	while node != null:
 		# Ghast fireball — deflects along the ARROW's own flight vector
 		# (full 3D, unlike an attacker's flattened look) and consumes the
@@ -364,6 +385,65 @@ func _sweep_entity_hit(from: Vector3, to: Vector3) -> bool:
 			return true
 		node = node.get_parent()
 	return false
+
+
+# lv.java:125 — `lw3.aG.b(0.3, 0.3, 0.3)`: every candidate's box is
+# expanded 0.3 m per axis before the segment test. Emulated with a box
+# 0.6 m square in cross-section laid along the segment (a swept sphere
+# of radius 0.3, squared off), overlapping the same layers the ray uses.
+# The nearest overlapped entity along the flight direction wins, and the
+# impact point is the segment's closest approach to it.
+func _sweep_grown_entity_hit(
+	space: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3, exclude: Array
+) -> bool:
+	var seg: Vector3 = to - from
+	var length: float = seg.length()
+	if length < 0.0001:
+		return false
+	var dir: Vector3 = seg / length
+	if _grown_hit_shape == null:
+		_grown_hit_shape = BoxShape3D.new()
+	_grown_hit_shape.size = Vector3(0.6, 0.6, length + 0.6)
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = _grown_hit_shape
+	# Basis.looking_at points local -Z along `dir`; the box is symmetric
+	# so which end is "forward" does not matter.
+	var up: Vector3 = Vector3.UP if absf(dir.dot(Vector3.UP)) < 0.99 else Vector3.RIGHT
+	query.transform = Transform3D(Basis.looking_at(dir, up), from + seg * 0.5)
+	query.collide_with_areas = true
+	query.collide_with_bodies = true
+	query.collision_mask = 0b101
+	query.exclude = exclude
+	var best: Node = null
+	var best_t: float = INF
+	# Terrain shares layer 1 with mob bodies, so chunk StaticBody3Ds land
+	# in this list too whenever the arrow skims the ground; they have no
+	# entity ancestor and are skipped, which is why the result cap is
+	# generous.
+	for hit: Dictionary in space.intersect_shape(query, 16):
+		var entity: Node3D = _entity_ancestor(hit.get("collider") as Node)
+		if entity == null:
+			continue
+		var t: float = clampf((entity.global_position - from).dot(dir), 0.0, length)
+		if t < best_t:
+			best_t = t
+			best = entity
+	if best == null:
+		return false
+	return _hit_entity_ancestor(best, from + dir * best_t)
+
+
+# The entity (mob, player, fireball) owning a collider, or null for
+# terrain and other non-entity bodies.
+static func _entity_ancestor(start: Node) -> Node3D:
+	var node: Node = start
+	while node != null:
+		if node is GhastFireball or node is MobBase:
+			return node as Node3D
+		if node.name == "Player" and node.has_method("take_damage"):
+			return node as Node3D
+		node = node.get_parent()
+	return null
 
 
 # Recursively gather all CollisionObject3D RIDs under `root`. Used to

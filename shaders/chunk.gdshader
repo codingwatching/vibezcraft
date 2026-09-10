@@ -12,6 +12,20 @@ shader_type spatial;
 // ends up inside a solid chunk cell (player collides with terrain). Entity
 // cubes (falling blocks, dropped items, TP-held block) use the cull_disabled
 // sibling at shaders/chunk_entity.gdshader — see that file for why.
-render_mode cull_back, unshaded;
+//
+// `world_vertex_coords`: every chunk is its own mesh instance, translated
+// by (cx·16, 0, cz·16), and two chunks share the vertices along their
+// border. Godot's default vertex path multiplies each instance's
+// modelview (view × model, formed per vertex) into the LOCAL vertex, so
+// the two instances reach a shared border vertex through different
+// intermediate roundings — a ULP apart on some drivers, which leaves a
+// hairline no triangle covers and the sky shows through ("slight gaps
+// between blocks showing the skybox", issue #7; seen on Windows, not
+// reproducible on Metal). In world mode the model transform is applied
+// first — an exact integer add — and the SAME view transform then runs on
+// identical inputs, so border vertices are bit-identical by construction.
+// Chunk transforms are pure translations, so NORMAL is unchanged by this.
+// The entity/overlay siblings keep local coords: they rotate.
+render_mode cull_back, unshaded, world_vertex_coords;
 
 #include "res://shaders/chunk_common.gdshaderinc"

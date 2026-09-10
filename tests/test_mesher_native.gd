@@ -575,3 +575,83 @@ func test_stale_native_falls_back_when_edge_light_is_attached() -> void:
 	Mesher._native_has_lit3 = saved_lit3
 
 	_assert_parity(expected, actual, "stale-native edge-light fallback")
+
+
+# --- Directional cubes + cactus (issue #7) ---
+
+
+# Count emitted quads whose four UVs span exactly `rect` — i.e. faces
+# textured with that atlas tile.
+func _faces_with_texture(mesh: Dictionary, tex: String) -> int:
+	var rect: Rect2 = BlockAtlas.uv_rect(tex)
+	var uvs: PackedVector2Array = mesh.uvs
+	var count: int = 0
+	for i in range(0, uvs.size(), 4):
+		var lo := Vector2(INF, INF)
+		var hi := Vector2(-INF, -INF)
+		for k in range(4):
+			lo = lo.min(uvs[i + k])
+			hi = hi.max(uvs[i + k])
+		if lo.is_equal_approx(rect.position) and hi.is_equal_approx(rect.end):
+			count += 1
+	return count
+
+
+func _directional_fixture() -> Chunk:
+	var chunk := Chunk.new()
+	for x in range(10):
+		chunk.set_block(x, 10, 4, Blocks.STONE)
+	chunk.set_block(8, 10, 4, Blocks.SAND)
+	chunk.set_block_with_meta(0, 11, 4, Blocks.FURNACE, 3)  # front on +X
+	chunk.set_block_with_meta(2, 11, 4, Blocks.LIT_FURNACE, 1)  # front on -X
+	chunk.set_block_with_meta(4, 11, 4, Blocks.PUMPKIN, 2)  # face on +Z
+	chunk.set_block_with_meta(6, 11, 4, Blocks.JACK_O_LANTERN, 0)  # face on -Z
+	chunk.set_block(8, 11, 4, Blocks.CACTUS)
+	chunk.set_block(8, 12, 4, Blocks.CACTUS)
+	return chunk
+
+
+func test_parity_directional_cubes_and_cactus() -> void:
+	# The native cube pass used to mesh furnaces and pumpkins as plain
+	# cubes from the flat per-id UV table (front on all four sides) and
+	# the cactus as a flush cube; the reference meshed pumpkins from meta
+	# and the parity suite never contained one, so the divergence was
+	# invisible. Both now defer these to the special-cell appendix.
+	var both := _mesh_both(_directional_fixture())
+	_assert_parity(both[0], both[1], "furnace / pumpkin / cactus")
+
+
+func test_furnace_shows_its_front_on_exactly_one_side() -> void:
+	var both := _mesh_both(_directional_fixture())
+	var nat: Dictionary = both[1]
+	assert_eq(_faces_with_texture(nat, "furnace_front"), 1, "one unlit front")
+	assert_eq(_faces_with_texture(nat, "furnace_front_lit"), 1, "one lit front")
+	# mj.java:60-63 — the other three sides are the side tile, and the
+	# top/bottom are STONE in Alpha. The stone floor row contributes its
+	# own stone faces, so only assert the sides here.
+	assert_eq(_faces_with_texture(nat, "furnace_side"), 6, "three plain sides per furnace")
+	assert_eq(_faces_with_texture(nat, "pumpkin_face"), 1, "one carved pumpkin face")
+	assert_eq(_faces_with_texture(nat, "jack_o_lantern_face"), 1, "one lantern face")
+
+
+func test_cactus_sides_are_inset_and_its_boxes_match_vanilla() -> void:
+	var chunk := Chunk.new()
+	chunk.set_block(3, 10, 3, Blocks.SAND)
+	chunk.set_block(3, 11, 3, Blocks.CACTUS)
+	var both := _mesh_both(chunk)
+	var nat: Dictionary = both[1]
+	# The side quads live on the planes x = 3 + 1/16, x = 4 - 1/16, etc.
+	var verts: PackedVector3Array = nat.vertices
+	var side_x: Dictionary = {}
+	for v: Vector3 in verts:
+		if v.y >= 11.0 and v.y <= 12.0 and (v.x != 3.0 and v.x != 4.0):
+			side_x[snappedf(v.x, 0.0001)] = true
+	assert_true(side_x.has(3.0625), "-X side pushed in by 1/16")
+	assert_true(side_x.has(3.9375), "+X side pushed in by 1/16")
+	# je.java:32-35 — physics box tops out at 15/16.
+	var top: float = -INF
+	for v: Vector3 in nat.collision_faces as PackedVector3Array:
+		if v.y > 11.0:
+			top = maxf(top, v.y)
+	assert_almost_eq(top, 11.9375, 0.0001, "collision top at 15/16")
+	assert_eq(Blocks.selection_aabb(Blocks.CACTUS).size.y, 1.0, "selection is full height")

@@ -552,3 +552,41 @@ func test_beach_placement_is_deterministic() -> void:
 	var c1 := Worldgen.generate_chunk(4, -3)
 	var c2 := Worldgen.generate_chunk(4, -3)
 	assert_eq(c1.blocks, c2.blocks, "beach placement is deterministic")
+
+
+# px.java:176 carves caves during provideChunk; WorldGenMinable (df.java:39)
+# runs afterwards from populate and replaces STONE only, so an ore vein
+# crossing a tunnel is cut by it. With the passes the other way round the
+# carver (which removes stone/dirt/grass only) left every crossing vein
+# standing in the void as a free-floating ore pillar (issue #7). A cell of
+# ore whose faces are ALL air can only come from that inversion, so the
+# count must be zero — deterministic per seed, no tolerance needed.
+func test_ore_never_stands_free_inside_cave_air() -> void:
+	var ores: Array[int] = [Blocks.COAL_ORE, Blocks.IRON_ORE, Blocks.GOLD_ORE, Blocks.DIAMOND_ORE]
+	var offsets: Array[Vector3i] = [
+		Vector3i(1, 0, 0),
+		Vector3i(-1, 0, 0),
+		Vector3i(0, 1, 0),
+		Vector3i(0, -1, 0),
+		Vector3i(0, 0, 1),
+		Vector3i(0, 0, -1)
+	]
+	var floating: int = 0
+	var ore_cells: int = 0
+	for cx in range(-5, 6):
+		for cz in range(-5, 6):
+			var c := Worldgen.generate_chunk(cx, cz)
+			for x in range(1, Chunk.SIZE_X - 1):
+				for z in range(1, Chunk.SIZE_Z - 1):
+					for y in range(5, 60):
+						if not ores.has(c.get_block(x, y, z)):
+							continue
+						ore_cells += 1
+						var exposed: int = 0
+						for o: Vector3i in offsets:
+							if c.get_block(x + o.x, y + o.y, z + o.z) == Blocks.AIR:
+								exposed += 1
+						if exposed == 6:
+							floating += 1
+	assert_gt(ore_cells, 1000, "the scan saw ore at all (got %d)" % ore_cells)
+	assert_eq(floating, 0, "no ore cell is surrounded by cave air (got %d)" % floating)
