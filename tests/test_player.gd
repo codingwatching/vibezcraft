@@ -375,3 +375,37 @@ func test_bed_wake_maps_a_standing_point_to_itself() -> void:
 	var pos: Vector3 = _wake(cm, Vector3i(2, 64, 0))
 	assert_eq(Vector3i(floori(pos.x), floori(pos.y), floori(pos.z)), Vector3i(2, 64, 0))
 	cm.free()
+
+
+# Creative is invulnerable in vanilla. Ours opted out of damage one source
+# at a time — fall and drowning checked `creative_mode`, but a zombie, a
+# lava pool, a cactus or a creeper still took hearts off. One gate in
+# take_damage covers every source, present and future.
+func test_creative_mode_blocks_every_damage_source() -> void:
+	var player: CharacterBody3D = _PLAYER_SCENE.instantiate()
+	autofree(player)
+	player.health = 20
+	player.creative_mode = true
+	for source: String in [
+		player.DAMAGE_GENERIC,
+		player.DAMAGE_FALL,
+		player.DAMAGE_DROWN,
+		player.DAMAGE_LAVA,
+		player.DAMAGE_CACTUS,
+		player.DAMAGE_MOB,
+		player.DAMAGE_FIRE
+	]:
+		player.take_damage(5, source)
+		assert_eq(player.health, 20, "%s does not hurt a creative player" % source)
+
+
+func test_leaving_creative_makes_the_player_mortal_again() -> void:
+	var player: CharacterBody3D = _PLAYER_SCENE.instantiate()
+	autofree(player)
+	player.health = 20
+	player.creative_mode = true
+	player.take_damage(5, player.DAMAGE_MOB)
+	assert_eq(player.health, 20, "immune while creative")
+	player.creative_mode = false
+	player.take_damage(5, player.DAMAGE_MOB)
+	assert_lt(player.health, 20, "mortal once creative is off")

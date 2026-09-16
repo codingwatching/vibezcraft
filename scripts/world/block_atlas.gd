@@ -19,6 +19,12 @@ const GRID_SIZE := 16
 const PACK_BASE := "res://assets/textures/packs/"
 const DEFAULT_PACK := "alpha_vanilla"
 
+# Width of the duplicated-edge ring packed around every tile (see build()).
+# One texel is enough: the shader samples with filter_nearest and no
+# mipmaps, so the only over-reach to absorb is the sub-texel UV
+# extrapolation MSAA does at a face's edge fragments.
+const _GUTTER_PX: int = 1
+
 # Face kinds for the precomputed UV lookup. Mapped from mesher's face_idx
 # (0-5) via Mesher._FACE_KIND so the fast indexed path and the old string
 # path resolve to the same atlas rect.
@@ -222,6 +228,13 @@ const _LAYOUT := {
 	# the two raised torches reuse the existing redstone-torch tiles.
 	"redstone_repeater_off": 114,
 	"redstone_repeater_on": 115,
+	# Furnace side. `directional_face_texture` has returned this name for
+	# the three non-front sides since furnaces gained a facing, but the
+	# slot was never added — so `uv_rect` fell through to Rect2(0,0,0,0),
+	# every side sampled the atlas's first texel, and the furnace rendered
+	# with flat grey sides (issue #8 screenshots). The art was already in
+	# every pack; only the slot was missing.
+	"furnace_side": 116,
 }
 
 # Foliage tint variants.
@@ -320,20 +333,26 @@ static func build() -> void:
 		_slot_size = first_tex.get_width()
 	print("[BlockAtlas] pack=%s slot_size=%d" % [active_pack, _slot_size])
 
-	var atlas_image := Image.create(
-		_slot_size * GRID_SIZE, _slot_size * GRID_SIZE, false, Image.FORMAT_RGBA8
-	)
-	var slot_uv: float = 1.0 / float(GRID_SIZE)
-	# Half-texel UV inset to kill atlas bleed at tile borders. Without
-	# this, a face whose UV vertex lands exactly on the slot boundary
-	# (e.g. 0.125 = end of slot 0) can sample the FIRST texel of the
-	# adjacent slot — visible as the thin white seams between blocks.
-	# Vanilla MC's terrain.png leaves a 1-px gutter; we shrink the rect
-	# in UV space instead so we don't have to repack textures, and we
-	# still get pixel-perfect Alpha look (sub-pixel inset is invisible).
-	# Texel size in UV = 1 / (slot_size × GRID_SIZE); half-texel inset
-	# is half that on each side.
-	var inset: float = 0.5 / float(_slot_size * GRID_SIZE)
+	var cell: int = _cell_size()
+	var atlas_px: int = cell * GRID_SIZE
+	var atlas_image := Image.create(atlas_px, atlas_px, false, Image.FORMAT_RGBA8)
+	var inv_atlas: float = 1.0 / float(atlas_px)
+	# Tiles are packed with a real GUTTER — a one-texel ring around each
+	# slot holding a copy of that tile's edge pixels — and the UV rect then
+	# covers the tile EXACTLY, with no inset.
+	#
+	# The previous packing had no gutter and shrank the rect by half a texel
+	# instead. That does stop the bleed, but it is not invisible the way the
+	# old comment here claimed: mapping a 16 px tile across 15 texel widths
+	# makes the first and last pixel column of every block face render at
+	# HALF width. Players see it immediately at close range — "the block
+	# pixels are cut in half at the edges which makes it look weird"
+	# (issue #8). With a gutter, a UV that lands exactly on (or up to a
+	# texel past) the tile boundary samples a COPY of the correct edge
+	# pixel, so full-width pixels and no-bleed stop being a trade-off.
+	# This is what vanilla's terrain.png gutter buys, and it also covers the
+	# MSAA case where an edge fragment interpolates its UV outside the
+	# primitive it belongs to.
 	for tex_name: String in _LAYOUT:
 		var idx: int = _LAYOUT[tex_name]
 		var col: int = idx % GRID_SIZE
@@ -363,14 +382,13 @@ static func build() -> void:
 		if img.get_width() != _slot_size or img.get_height() != _slot_size:
 			# Resize mismatched textures to slot size with nearest-neighbor
 			img.resize(_slot_size, _slot_size, Image.INTERPOLATE_NEAREST)
-		atlas_image.blit_rect(
-			img, Rect2i(0, 0, _slot_size, _slot_size), Vector2i(col * _slot_size, row * _slot_size)
-		)
+		var origin := Vector2i(col * cell + _GUTTER_PX, row * cell + _GUTTER_PX)
+		_blit_tile_with_gutter(atlas_image, img, origin)
 		_uv_rects[tex_name] = Rect2(
-			col * slot_uv + inset,
-			row * slot_uv + inset,
-			slot_uv - 2.0 * inset,
-			slot_uv - 2.0 * inset,
+			float(origin.x) * inv_atlas,
+			float(origin.y) * inv_atlas,
+			float(_slot_size) * inv_atlas,
+			float(_slot_size) * inv_atlas,
 		)
 	# Reuse the existing ImageTexture handle when we're rebuilding so
 	# materials that already hold a reference (overlay/entity + every
@@ -382,6 +400,55 @@ static func build() -> void:
 	else:
 		_texture.update(atlas_image)
 	_build_block_face_uvs()
+
+
+# Pixel pitch of one atlas cell: the tile plus its gutter on either side.
+static func _cell_size() -> int:
+	return _slot_size + 2 * _GUTTER_PX
+
+
+# Blit one tile at `origin` and wrap it in a ring of its own edge pixels.
+# Nine blits: the tile itself, its four edges stretched into the side
+# gutters, and the four corner texels. Anything that reaches a texel past
+# the tile — a UV landing exactly on the boundary, or an MSAA edge fragment
+# extrapolating outside its own primitive — then finds a copy of the pixel
+# it should have sampled instead of the neighbouring tile.
+static func _blit_tile_with_gutter(atlas: Image, tile: Image, origin: Vector2i) -> void:
+	var s: int = _slot_size
+	var g: int = _GUTTER_PX
+	atlas.blit_rect(tile, Rect2i(0, 0, s, s), origin)
+	atlas.blit_rect(tile, Rect2i(0, 0, g, s), origin - Vector2i(g, 0))
+	atlas.blit_rect(tile, Rect2i(s - g, 0, g, s), origin + Vector2i(s, 0))
+	atlas.blit_rect(tile, Rect2i(0, 0, s, g), origin - Vector2i(0, g))
+	atlas.blit_rect(tile, Rect2i(0, s - g, s, g), origin + Vector2i(0, s))
+	atlas.blit_rect(tile, Rect2i(0, 0, g, g), origin - Vector2i(g, g))
+	atlas.blit_rect(tile, Rect2i(s - g, 0, g, g), origin + Vector2i(s, -g))
+	atlas.blit_rect(tile, Rect2i(0, s - g, g, g), origin + Vector2i(-g, s))
+	atlas.blit_rect(tile, Rect2i(s - g, s - g, g, g), origin + Vector2i(s, s))
+
+
+# The tile's rect grown to include its gutter ring. Shader uniforms that
+# only ask "is this fragment inside tile X" — the grass and leaves tint
+# gates — must use this rather than the exact rect.
+#
+# With MSAA the fragment shader still runs once per fragment at the pixel
+# CENTRE, and for a partially covered pixel on a face's edge that centre
+# lies outside the primitive, so its interpolated UV is extrapolated a
+# fraction of a texel past the tile. An exact-rect test fails there, the
+# grass tint was skipped, and the raw GRAYSCALE tile rendered instead — a
+# pale one-pixel line along every block edge that reads as a gap letting
+# the sky through (issue #8, "spacing between blocks still has the sky
+# gap"). The gutter holds a copy of the same tile, so widening the gate to
+# cover it tints exactly the fragments that belong to the tile.
+#
+# NOT for `fire_uv`: the shader divides by that rect to remap into the
+# animation strip, so it has to stay the true tile bounds.
+static func uv_gate_rect(tex_name: String) -> Rect2:
+	var r: Rect2 = uv_rect(tex_name)
+	if r.size.x <= 0.0:
+		return r
+	var pad: float = float(_GUTTER_PX) / float(_cell_size() * GRID_SIZE)
+	return Rect2(r.position - Vector2(pad, pad), r.size + Vector2(pad * 2.0, pad * 2.0))
 
 
 # Walks every possible block id × {top, bottom, side} and resolves it
@@ -461,7 +528,11 @@ static func tile_image(block_id: int, face_kind: int) -> Image:
 	var atlas_img: Image = _texture.get_image()
 	if atlas_img == null:
 		return null
-	return atlas_img.get_region(Rect2i(col * _slot_size, row * _slot_size, _slot_size, _slot_size))
+	# Skip the gutter ring — callers want the tile's own pixels only.
+	var cell: int = _cell_size()
+	return atlas_img.get_region(
+		Rect2i(col * cell + _GUTTER_PX, row * cell + _GUTTER_PX, _slot_size, _slot_size)
+	)
 
 
 # Flat float array (4 floats per Rect2) for native-extension consumers.
@@ -482,7 +553,7 @@ static func material() -> ShaderMaterial:
 		# Tell the shader where the grass-top atlas slot lives so it can
 		# gate per-instance biome tinting (Savanna yellow) to grass faces
 		# only. Vec4 = (x, y, w, h) in UV space.
-		var grass_rect: Rect2 = uv_rect("grass_top")
+		var grass_rect: Rect2 = uv_gate_rect("grass_top")
 		_material.set_shader_parameter(
 			"grass_top_uv",
 			Vector4(
@@ -491,7 +562,7 @@ static func material() -> ShaderMaterial:
 		)
 		# Same UV gate for leaves — shader tints fragments inside this rect
 		# with the canonical Alpha foliage green.
-		var leaves_rect: Rect2 = uv_rect("leaves")
+		var leaves_rect: Rect2 = uv_gate_rect("leaves")
 		_material.set_shader_parameter(
 			"leaves_uv",
 			Vector4(
@@ -536,14 +607,14 @@ static func overlay_material() -> ShaderMaterial:
 		# first-person held grass / leaves blocks pick up the canonical Alpha
 		# tint (the overlay shader's grass_tint / leaves_tint defaults)
 		# instead of rendering the raw grayscale source tiles.
-		var grass_rect: Rect2 = uv_rect("grass_top")
+		var grass_rect: Rect2 = uv_gate_rect("grass_top")
 		_overlay_material.set_shader_parameter(
 			"grass_top_uv",
 			Vector4(
 				grass_rect.position.x, grass_rect.position.y, grass_rect.size.x, grass_rect.size.y
 			)
 		)
-		var leaves_rect: Rect2 = uv_rect("leaves")
+		var leaves_rect: Rect2 = uv_gate_rect("leaves")
 		_overlay_material.set_shader_parameter(
 			"leaves_uv",
 			Vector4(
@@ -582,14 +653,14 @@ static func entity_material() -> ShaderMaterial:
 		# chunk material but a separate ShaderMaterial instance, so the
 		# instance-uniform default in the shader still applies UNLESS we
 		# override it on the material like this.
-		var grass_rect: Rect2 = uv_rect("grass_top")
+		var grass_rect: Rect2 = uv_gate_rect("grass_top")
 		_entity_material.set_shader_parameter(
 			"grass_top_uv",
 			Vector4(
 				grass_rect.position.x, grass_rect.position.y, grass_rect.size.x, grass_rect.size.y
 			)
 		)
-		var leaves_rect: Rect2 = uv_rect("leaves")
+		var leaves_rect: Rect2 = uv_gate_rect("leaves")
 		_entity_material.set_shader_parameter(
 			"leaves_uv",
 			Vector4(

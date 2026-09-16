@@ -97,3 +97,46 @@ func test_glowing_ore_uses_same_uv_as_unlit() -> void:
 	var unlit: Rect2 = BlockAtlas.uv_rect_for(Blocks.REDSTONE_ORE, BlockAtlas.FACE_TOP)
 	assert_eq(lit, unlit, "both ore ids sample tile index 51's slot")
 	assert_gt(lit.size.x, 0.0, "shared rect is non-empty")
+
+
+# A texture name with no _LAYOUT slot resolves to Rect2(0, 0, 0, 0), so the
+# face samples the atlas's very first texel and renders as flat grey with no
+# error anywhere. That is exactly how furnaces shipped with untextured
+# sides: `directional_face_texture` returned "furnace_side" while the slot
+# was still missing, and the art sat unused in every pack. Sweep every name
+# a block face can ask for so the next one cannot slip through the same way.
+func test_every_block_face_texture_name_has_an_atlas_slot() -> void:
+	BlockAtlas.reset()
+	BlockAtlas.build()
+	var missing: Array[String] = []
+	for id: int in Blocks.REGISTERED_IDS:
+		if id == Blocks.AIR:
+			continue
+		var names: Array[String] = []
+		for face: String in ["top", "bottom", "side"]:
+			names.append(Blocks.get_face_texture(id, face))
+		if Blocks.has_directional_face(id):
+			for face_idx: int in range(6):
+				for meta: int in range(4):
+					names.append(Blocks.directional_face_texture(id, face_idx, meta))
+		for tex_name: String in names:
+			if tex_name.is_empty() or missing.has(tex_name):
+				continue
+			if BlockAtlas.uv_rect(tex_name).size.x <= 0.0:
+				missing.append(tex_name)
+	assert_eq(missing, [] as Array[String], "every face texture name resolves to an atlas slot")
+
+
+# The specific regression: a furnace's three plain sides must draw the
+# furnace side art, not the front and not a grey void.
+func test_furnace_sides_resolve_to_their_own_tile() -> void:
+	var side: Rect2 = BlockAtlas.uv_rect("furnace_side")
+	assert_gt(side.size.x, 0.0, "furnace_side is packed")
+	assert_ne(side, BlockAtlas.uv_rect("furnace_front"), "sides are not the front")
+	for id: int in [Blocks.FURNACE, Blocks.LIT_FURNACE]:
+		var front_idx: int = Blocks.directional_front_face_idx(0)
+		for face_idx: int in range(2, 6):
+			if face_idx == front_idx:
+				continue
+			var tex_name: String = Blocks.directional_face_texture(id, face_idx, 0)
+			assert_eq(tex_name, "furnace_side", "id %d face %d is a plain side" % [id, face_idx])

@@ -1369,6 +1369,72 @@ static func display_name(item_id: int) -> String:
 			return "Glowstone Dust"
 		REDSTONE_REPEATER:
 			return "Redstone Repeater"
+		# Everything below shipped without a name, so their tooltips were
+		# blank in every slot UI — reported for the redstone torch, but it
+		# was 31 ids (issue #8). Names follow Alpha's own strings: rose,
+		# dandelion, moss stone, monster spawner, "Slabs" plural for the
+		# double variants (see HALF_SLAB / DOUBLE_SLAB above).
+		Blocks.REDSTONE_TORCH, Blocks.REDSTONE_TORCH_OFF:
+			return "Redstone Torch"
+		Blocks.REDSTONE_WIRE:
+			# Matches Items.REDSTONE (152), which is what a broken wire
+			# actually drops into the slot — one name for one concept.
+			return "Redstone Dust"
+		Blocks.REDSTONE_ORE, Blocks.GLOWING_REDSTONE_ORE:
+			return "Redstone Ore"
+		Blocks.LEVER:
+			return "Lever"
+		Blocks.STONE_BUTTON:
+			return "Button"
+		Blocks.STONE_PRESSURE_PLATE:
+			return "Stone Pressure Plate"
+		Blocks.WOODEN_PRESSURE_PLATE:
+			return "Wooden Pressure Plate"
+		Blocks.FENCE_GATE:
+			return "Fence Gate"
+		Blocks.JUKEBOX:
+			return "Jukebox"
+		Blocks.MOB_SPAWNER:
+			return "Monster Spawner"
+		Blocks.MOSSY_COBBLESTONE:
+			return "Moss Stone"
+		Blocks.CLAY:
+			return "Clay"
+		Blocks.FLOWER_RED:
+			return "Rose"
+		Blocks.FLOWER_YELLOW:
+			return "Dandelion"
+		Blocks.MUSHROOM_BROWN:
+			return "Brown Mushroom"
+		Blocks.MUSHROOM_RED:
+			return "Red Mushroom"
+		Blocks.WOOD_HALF_SLAB:
+			return "Wooden Slab"
+		Blocks.WOOD_DOUBLE_SLAB:
+			return "Wooden Slabs"
+		Blocks.COBBLESTONE_HALF_SLAB:
+			return "Cobblestone Slab"
+		Blocks.COBBLESTONE_DOUBLE_SLAB:
+			return "Cobblestone Slabs"
+		Blocks.BED_FOOT, Blocks.BED_HEAD:
+			return "Bed"
+		# World forms of items that carry their own id (146/147/185). The
+		# block id normally drops the item, but it is inventory-capable per
+		# the registry, so it needs a name like anything else that can land
+		# in a slot.
+		Blocks.WOODEN_DOOR:
+			return "Wooden Door"
+		Blocks.IRON_DOOR:
+			return "Iron Door"
+		Blocks.RAIL:
+			return "Rail"
+		Blocks.WATER_STILL, Blocks.WATER_FLOWING:
+			return "Water"
+		Blocks.LAVA_STILL, Blocks.LAVA_FLOWING:
+			return "Lava"
+	# Blocks.WORLD_ONLY_IDS (the portal and the two repeater states) end up
+	# here on purpose: they can never sit in a slot, so a blank tooltip is
+	# the contract test_nether_blocks pins.
 	return ""
 
 

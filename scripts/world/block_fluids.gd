@@ -94,6 +94,8 @@ const FALLING_BIT: int = 8
 # lava_flowing) that was scheduled. Mirrors ja.java:23 `a(World, x, y, z, Random)`.
 static func update(manager, pos: Vector3i, block_id: int) -> void:
 	var is_water_fluid: bool = Blocks.is_water(block_id)
+	if is_water_fluid and evaporate_if_forbidden(manager, pos):
+		return
 	var decay: int = (
 		WATER_DECAY_PER_STEP
 		if is_water_fluid
@@ -248,6 +250,8 @@ static func update(manager, pos: Vector3i, block_id: int) -> void:
 # Water cells themselves don't convert — only lava does.
 static func on_neighbor_changed(manager, pos: Vector3i) -> void:
 	var id: int = manager.get_world_block(pos)
+	if Blocks.is_water(id) and evaporate_if_forbidden(manager, pos):
+		return
 	if id == Blocks.WATER_STILL:
 		_demote_to_flowing(manager, pos, Blocks.WATER_FLOWING)
 	elif id == Blocks.LAVA_STILL:
@@ -272,6 +276,32 @@ static func on_neighbor_changed(manager, pos: Vector3i) -> void:
 			var neighbor_id: int = manager.get_world_block(neighbor)
 			if Blocks.is_lava(neighbor_id):
 				_check_lava_solidification(manager, neighbor)
+
+
+# Vanilla `ja.java` BlockFlowing.onBlockAdded: in a dimension whose provider
+# forbids water, a water cell removes itself with the fizz the moment it is
+# added, whatever put it there. Gating only the bucket (all we used to do)
+# left every other route open — breaking ICE writes WATER_STILL (see
+# interaction.gd::_break_replacement), so one block of ice carried down from
+# a snow biome seeded a Nether flood that turned the lava sea to obsidian
+# and washed a portal away (issue #8).
+#
+# Returns true when the cell was removed, so callers stop processing it.
+static func evaporate_if_forbidden(manager, pos: Vector3i) -> bool:
+	if DimensionContext.active_provider().allows_water_placement:
+		return false
+	# Confirm the cell against the world rather than trusting the caller's
+	# `block_id`. A scheduled tick carries the id the cell had when it was
+	# enqueued, and callers are free to pass a family id that does not match
+	# what is there now (test_fluid_washout does exactly that) — deleting on
+	# the caller's word would blank whatever had replaced the water.
+	if not Blocks.is_water(manager.get_world_block(pos)):
+		return false
+	manager.set_world_block(pos, Blocks.AIR)
+	# FX need a live scene parent; headless fixtures pass a plain double.
+	if manager is Node and is_instance_valid(manager):
+		FluidFx.spawn_nether_water_evaporation(manager, pos)
+	return true
 
 
 # ld.java:223-254 `j()` — lava solidification check. If `pos` holds
@@ -398,6 +428,14 @@ static func _is_solid_blocker(id: int) -> bool:
 		return false
 	if Blocks.is_water(id) or Blocks.is_lava(id):
 		return false
+	# Vanilla names the portal explicitly in that hardcoded list, and it has
+	# to be named here too: `is_solid_collision(PORTAL)` is false on purpose
+	# (you walk through a portal), so the generic test below let water flow
+	# straight into the sheet and overwrite it. A Nether flood then washed
+	# the portal away cell by cell — reported as "portal was gone entirely"
+	# after a reload (issue #8).
+	if id == Blocks.PORTAL:
+		return true
 	# Use `is_solid_collision` instead of `is_opaque` so blocks that are
 	# rendered non-opaque but physically solid (CHEST, MOB_SPAWNER,
 	# LEAVES, GLASS, etc.) correctly block fluid flow. Vanilla water

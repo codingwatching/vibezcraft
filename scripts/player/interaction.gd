@@ -3840,6 +3840,13 @@ func _build_uv_cube_mesh(size: float) -> ArrayMesh:
 func _break_replacement(target: Vector3i, broken_id: int) -> int:
 	if broken_id != Blocks.ICE:
 		return Blocks.AIR
+	# A dimension that evaporates water gets no meltwater either. Vanilla
+	# reaches the same end state one tick later (the water deletes itself in
+	# onBlockAdded — see BlockFluids.evaporate_if_forbidden); skipping the
+	# write here means no flash of a puddle and no spread on the tick it
+	# would have had.
+	if not DimensionContext.active_provider().allows_water_placement:
+		return Blocks.AIR
 	var below: int = _chunk_manager.get_world_block(target + Vector3i(0, -1, 0))
 	if Blocks.is_solid_collision(below) or Blocks.is_fluid(below):
 		return Blocks.WATER_STILL

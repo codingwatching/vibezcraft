@@ -40,8 +40,17 @@ static func sample_brightness(chunk_manager: Node, world_pos: Vector3i) -> float
 	var effective: int
 	if chunk_manager.has_method("get_world_effective_light"):
 		effective = chunk_manager.get_world_effective_light(world_pos)
-	else:
+	elif (
+		chunk_manager.has_method("get_world_sky_light")
+		and chunk_manager.has_method("get_world_block_light")
+	):
 		var sky: int = chunk_manager.get_world_sky_light(world_pos)
 		var block: int = chunk_manager.get_world_block_light(world_pos)
 		effective = WorldTime.effective_light_level(sky, block)
+	else:
+		# A node that cannot answer light queries at all — a caller passed
+		# something that is not the ChunkManager. Rendering an entity at
+		# full brightness is a cosmetic miss; raising here killed the whole
+		# throw (issue #8, snowball impact particles).
+		return 1.0
 	return brightness_for_level(effective)

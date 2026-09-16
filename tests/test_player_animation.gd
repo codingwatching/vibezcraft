@@ -61,26 +61,34 @@ func test_hurt_tint_reddens_the_skin_and_clears() -> void:
 	assert_almost_eq(mat.albedo_color.g, mat.albedo_color.r, 0.001, "neutral again")
 
 
-func test_a_hit_arms_the_camera_flinch_and_strips_cleanly() -> void:
+func test_a_hit_arms_the_camera_flinch_and_leaves_no_residue() -> void:
 	var player: CharacterBody3D = _PLAYER_SCENE.instantiate()
 	autofree(player)
 	player.health = 20
 	var camera: Camera3D = player.get_node("Camera3D")
 	# Off-tree instantiation skips @onready; wire the camera by hand.
 	player.set("_camera", camera)
-	camera.rotation.x = 0.3
+	player.set("_look_pitch", 0.3)
 	player.take_damage(1, "mob", Vector3(0.0, 0.0, 1.0))
 	assert_gt(float(player.get("_hurt_time_sec")), 0.0, "hurtTime armed")
 	# Step a few frames into the flinch: the camera must move off the
-	# true pitch, and stripping must return it exactly.
+	# true pitch.
 	var moved: bool = false
 	for _i: int in range(6):
-		player.call("_strip_camera_effects")
 		player.call("_apply_camera_effects", 1.0 / 60.0)
 		if absf(camera.rotation.x - 0.3) > 0.001 or absf(camera.rotation.z) > 0.001:
 			moved = true
 	assert_true(moved, "the flinch bends the view")
-	player.call("_strip_camera_effects")
+	# Drop the knockback the hit imparted. Off the tree nothing integrates
+	# velocity, so a standing motionY would keep the airborne view tilt
+	# (eb.java:75) legitimately engaged and mask what this test is about.
+	player.velocity = Vector3.ZERO
+	# Run the flinch out. The view has to come back to the look pitch
+	# EXACTLY: the old add-offset-then-strip-it-again bookkeeping mixed the
+	# Euler axes and left the world permanently tilted a little after a fall
+	# or a hit (issue #8).
+	for _i: int in range(180):
+		player.call("_apply_camera_effects", 1.0 / 60.0)
 	assert_almost_eq(camera.rotation.x, 0.3, 0.0001, "look pitch survives the flinch")
 	assert_almost_eq(camera.rotation.z, 0.0, 0.0001, "no residual roll")
 
