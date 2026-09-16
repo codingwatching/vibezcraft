@@ -297,14 +297,88 @@ func _apply_physics(delta: float) -> void:
 	_velocity.x *= drag_factor
 	_velocity.z *= drag_factor
 	var new_pos: Vector3 = global_position + _velocity * delta
-	# Down raycast snaps the item to the floor when it would pass through.
-	_ray_query.from = global_position
-	_ray_query.to = Vector3(new_pos.x, new_pos.y - MESH_SIZE * 0.5, new_pos.z)
-	var result := get_world_3d().direct_space_state.intersect_ray(_ray_query)
-	if not result.is_empty() and _velocity.y <= 0.0:
-		new_pos.y = result.position.y + MESH_SIZE * 0.5
-		_velocity.y = 0.0
+	if _velocity.y <= 0.0:
+		var half: float = MESH_SIZE * 0.5
+		# Cooked collision wins wherever it exists: the chunk trimesh follows
+		# the RENDER mesh, so it catches the tread of a stair and the open
+		# half of a doorway, which a per-cell AABB cannot. It only exists
+		# within ChunkManager.collision_radius of the player, which is why
+		# the voxel scan BACKS IT UP rather than replacing it — past that
+		# ring the ray hit nothing, the item sank into the ground and
+		# _push_out_of_solid_block shoved it back, forever (issue #8).
+		var floor_top: float = _collider_floor_top(new_pos, half)
+		if floor_top == -INF:
+			floor_top = _voxel_floor_top(new_pos, global_position.y - half, new_pos.y - half)
+		if floor_top > -INF:
+			new_pos.y = floor_top + half
+			_velocity.y = 0.0
 	global_position = new_pos
+
+
+# Surface the chunk's cooked collision reports directly under the item, or
+# -INF when there is no collider in the way (either open air, or terrain
+# whose chunk is outside the live-physics ring).
+func _collider_floor_top(new_pos: Vector3, half: float) -> float:
+	if _ray_query == null or not is_inside_tree():
+		return -INF
+	var space: PhysicsDirectSpaceState3D = get_world_3d().direct_space_state
+	if space == null:
+		return -INF
+	_ray_query.from = global_position
+	_ray_query.to = Vector3(new_pos.x, new_pos.y - half, new_pos.z)
+	var result: Dictionary = space.intersect_ray(_ray_query)
+	if result.is_empty():
+		return -INF
+	return float(result.position.y)
+
+
+# Highest block surface the item's underside would cross this step, or
+# -INF for a clear fall. Read from VOXEL data rather than a physics ray:
+# chunk trimesh colliders only exist inside ChunkManager.collision_radius
+# (one chunk) of the player, so the old downward raycast found nothing for
+# any drop past that ring. The item sank into the terrain,
+# _push_out_of_solid_block shoved it back out, and the two fought every
+# frame — the endless bounce on distant items in issue #8. Voxel reads
+# answer the same question at any distance, and Blocks.collision_aabb
+# keeps slabs and soul sand resting at their true height.
+func _voxel_floor_top(pos: Vector3, from_bottom: float, to_bottom: float) -> float:
+	if _chunk_manager == null or not _chunk_manager.has_method("get_world_block"):
+		return -INF
+	var x: int = floori(pos.x)
+	var z: int = floori(pos.z)
+	# Scan the cells the underside sweeps through, top-down, so the first
+	# surface found is the one it lands on. A resting item sits with
+	# `from_bottom` exactly on a cell boundary, so floori() puts the scan's
+	# first cell at the AIR above its floor and the next one down is the
+	# floor itself — which is how it keeps re-finding the surface it is
+	# already on instead of drifting off it.
+	var y_top: int = floori(from_bottom)
+	var y_bottom: int = floori(to_bottom)
+	for y in range(y_top, y_bottom - 1, -1):
+		var id: int = _chunk_manager.get_world_block(Vector3i(x, y, z))
+		if not Blocks.is_solid_collision(id):
+			continue
+		var meta: int = 0
+		if _chunk_manager.has_method("get_world_block_meta"):
+			meta = _chunk_manager.get_world_block_meta(Vector3i(x, y, z))
+		var box: AABB = Blocks.collision_aabb(id, meta)
+		if box.size.y <= 0.0:
+			continue
+		# The box's XZ footprint counts as much as its height. A door is a
+		# 3/16 slab, a fence a 4/16 post, an open gate thinner still — take
+		# any of them as a full-cell floor and an item dropped in a doorway
+		# settles a whole block up, hanging in the open half. Test the same
+		# column the raycast walks: the item's centre.
+		var fx: float = pos.x - float(x)
+		var fz: float = pos.z - float(z)
+		if fx < box.position.x or fx > box.position.x + box.size.x:
+			continue
+		if fz < box.position.z or fz > box.position.z + box.size.z:
+			continue
+		var top: float = float(y) + box.position.y + box.size.y
+		if top <= from_bottom + _AABB_EPSILON and top >= to_bottom:
+			return top
+	return -INF
 
 
 # Build a voxel-extruded sprite mesh from the item's icon texture and

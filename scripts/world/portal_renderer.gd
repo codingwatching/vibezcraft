@@ -145,17 +145,21 @@ func _build_cell_mesh() -> ArrayMesh:
 		Vector3(0.5, 0.5, t),
 		Vector3(-0.5, 0.5, t),
 	]
-	# Six quads as corner indices, wound so the outward side survives back-
-	# face culling — the shader disables culling anyway, but keeping the
-	# winding honest means normals point outward for anything that reads
-	# them.
+	# The two wide faces only, wound so the outward side survives back-face
+	# culling — the shader disables culling anyway, but keeping the winding
+	# honest means normals point outward for anything that reads them.
+	#
+	# The four rim caps (+/-Y and +/-X) are deliberately absent. Vanilla
+	# renders the portal through the ordinary block path, where every face
+	# is culled against an opaque neighbour — and every rim of a valid
+	# portal cell touches either obsidian frame or another portal cell, so
+	# vanilla never draws one. Emitting them from a shared MultiMesh mesh
+	# (which cannot cull per cell) put a purple sliver coplanar with the
+	# frame's inner faces, reported as "portal frame has textures on the
+	# top" (issue #8).
 	var quads: Array = [
 		[0, 3, 2, 1],  # -Z, the wide face
 		[4, 5, 6, 7],  # +Z, the other wide face
-		[0, 1, 5, 4],  # -Y
-		[3, 7, 6, 2],  # +Y
-		[0, 4, 7, 3],  # -X
-		[1, 2, 6, 5],  # +X
 	]
 	for quad: Array in quads:
 		var a: Vector3 = corners[quad[0]]

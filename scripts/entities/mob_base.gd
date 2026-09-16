@@ -1496,7 +1496,17 @@ func attach_held_item(
 	node.mesh = mesh
 	arm_pivot.add_child(node)
 	node.basis = item_basis
-	node.position = hand_offset
+	# Grip the HANDLE, not the middle of the sprite. SpriteExtruder builds
+	# the mesh centred on the sprite, so parenting it straight to the hand
+	# puts the fist halfway up the blade — the pigman looked like it was
+	# holding its sword by the sharp end (issue #8). The player already
+	# corrects for this (player.gd::_update_held_item); route the mob path
+	# through the same helper. The offset is in pixel units and item_basis
+	# carries the pixel scale, so one multiply lands it in arm space.
+	# (Bows grip at the centre instead — see player.gd's TP bow branch, which
+	# is why that one skips this helper.)
+	var pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
+	node.position = hand_offset + item_basis * Vector3(-pivot_px.x, -pivot_px.y, 0.0)
 	node.material_override = held_item_material(tex)
 	return node
 

@@ -228,8 +228,19 @@ func _hit_entity(target: Node, _hit_pos: Vector3) -> void:
 # Particle burst at the impact point using the snow block material,
 # then despawn. Vanilla also plays a faint impact SFX — defer until a
 # dedicated "snowball poof" clip ships (currently silent).
+#
+# The parent handed to BlockFx is BOTH the emitter's scene parent AND the
+# node it samples voxel light from, so it has to be the ChunkManager like
+# every other break-burst call site. We are parented to `Main` instead
+# (interaction.gd spawns us there), and passing that through crashed the
+# throw on impact with "Nonexistent function 'get_world_sky_light' in base
+# 'Node3D'" (issue #8).
 func _fizzle_at(pos: Vector3) -> void:
-	var parent: Node = get_parent()
+	# is_instance_valid, not a null check: a freed Node still reads as
+	# non-null through a held reference, and handing BlockFx a dead parent
+	# would fail at add_child. Matches dropped_item._resolve_chunk_manager.
+	var manager_live: bool = _chunk_manager != null and is_instance_valid(_chunk_manager)
+	var parent: Node = _chunk_manager if manager_live else get_parent()
 	if parent != null:
 		var ipos := Vector3i(int(floor(pos.x)), int(floor(pos.y)), int(floor(pos.z)))
 		BlockFx.spawn_break(parent, ipos, Blocks.SNOW_BLOCK)

@@ -178,8 +178,14 @@ var _fire_burn_tick: float = 0.0
 # grid of every implemented block + item plus a quantity selector.
 # Adding a new item no longer requires touching player.gd.
 const _CAM_FIRST_PERSON: Vector3 = Vector3(0, 0.7, 0)
-const _CAM_THIRD_BACK: Vector3 = Vector3(0, 1.0, 3.5)
-const _CAM_THIRD_FRONT: Vector3 = Vector3(0, 1.0, -3.5)
+# Third-person boom LENGTH, not a fixed offset. Vanilla's third-person
+# camera orbits the eye along the full look vector (`kb.java` walks back
+# `thirdPersonDistance` down the view ray), so looking up swings the camera
+# down and keeps the player in frame. Ours used to be a constant local
+# offset behind the head, which meant pitching just tilted a camera pinned
+# at shoulder height — "3rd person camera is like first person just placed
+# away from the player" (issue #8).
+const _CAM_THIRD_DISTANCE: float = 3.5
 
 # Vanilla MC F5 cycles: first → third-back → third-front → first.
 const PERSPECTIVE_FIRST: int = 0
@@ -462,18 +468,27 @@ var _is_flying: bool = false
 # and apply the roll to the camera (first-person view tilts with the
 # falling head) and the character model (third-person body lies sideways).
 var _death_time_sec: float = 0.0
-# First-person view bob + hurt flinch (kb.java:119-151). The camera's
-# Euler rotation is owned by the look handlers (pitch in x, death tilt in
-# z), so these effects are folded in as offsets at the end of _process
-# and stripped again at the start of the next, leaving the look math
-# untouched in between.
+# The player's TRUE look pitch in radians, clamped to +/-PITCH_LIMIT_DEG.
+# This — not `_camera.rotation.x` — is the source of truth, because Godot
+# derives `rotation` from the basis in YXZ order and that decomposition can
+# never report |x| > 90°: rotating past vertical comes back as a smaller x
+# with y and z flipped by 180°, so `clamp(_camera.rotation.x, ...)` silently
+# passed an overshoot through and left the view upside down (issue #8).
+# Every frame the camera's Euler is WRITTEN from this value plus the
+# render-only effect offsets below; nothing reads it back.
+var _look_pitch: float = 0.0
+# First-person view bob + hurt flinch (kb.java:119-151). Applied as absolute
+# writes on top of `_look_pitch` each frame rather than incremental
+# add-then-strip bookkeeping: `rotate_x` on a camera still carrying last
+# frame's roll mixes the Euler axes, and subtracting the scalars back out
+# does not undo that — the leftovers accumulated into a view that stayed
+# slightly tilted after a fall ("the world remains slightly offset").
 var _bob_distance: float = 0.0  # lw.java:362 distanceWalked (×0.6 per block)
 var _bob_amount: float = 0.0  # eb.java:74 cameraYaw — bob amplitude 0..0.1
 var _bob_pitch_deg: float = 0.0  # eb.java:75 cameraPitch — airborne tilt
 var _bob_last_pos: Vector3 = Vector3.ZERO
 var _hurt_time_sec: float = 0.0
 var _attacked_at_yaw: float = 0.0  # hf.java:307-310, radians, 90° = from the front
-var _camera_fx_applied: Vector2 = Vector2.ZERO  # (pitch, roll) currently folded in
 var _last_jump_press_time: float = -10.0
 # Water state between frames — `_was_in_water` drives the splash trigger
 # (vanilla Entity.N() fires on !inWater → inWater edge). `_swim_distance`
@@ -1337,10 +1352,9 @@ func _drive_limb_animation(delta: float) -> void:
 	var arm_locked: bool = _character_model.is_mining_visually()
 	_character_model.update_walk_animation(horiz_speed, delta, arm_locked)
 	if _camera != null and _character_model.has_method("set_look_pitch"):
-		var pitch: float = _camera.rotation.x - _camera_fx_applied.x
-		if perspective == PERSPECTIVE_THIRD_FRONT:
-			pitch = -pitch  # front mode stores the inverted pitch
-		_character_model.call("set_look_pitch", pitch)
+		# `_look_pitch` is already the player's true pitch in every
+		# perspective, with no view-bob folded in.
+		_character_model.call("set_look_pitch", _look_pitch)
 	_apply_swing_to_fp_props(progress)
 
 
@@ -1856,11 +1870,7 @@ func drop_item_into_world(dropped_id: int, count: int) -> int:
 # yaw + the camera's pitch always describe where they're looking).
 func _player_look_direction() -> Vector3:
 	var horiz: Vector3 = -transform.basis.z  # player body forward (yaw only)
-	var pitch: float = _camera.rotation.x
-	# Front mode inverts pitch in the input handler — undo that here so the
-	# throw direction follows the player's view, not the camera's.
-	if perspective == PERSPECTIVE_THIRD_FRONT:
-		pitch = -pitch
+	var pitch: float = _look_pitch
 	return horiz * cos(pitch) + Vector3(0, sin(pitch), 0)
 
 
@@ -1881,22 +1891,13 @@ func _update_debug_label() -> void:
 
 
 func _process(_delta: float) -> void:
-	_strip_camera_effects()
-	_update_camera_collision()
 	_tick_held_bow_stage()
 	_tick_sleep(_delta)
 	_poll_pad_look(_delta)
+	# Effects first: they write the camera's final Euler for the frame, and
+	# the third-person boom reads the pitch to place the camera.
 	_apply_camera_effects(_delta)
-
-
-# Undo last frame's bob/flinch offsets so every look handler that runs
-# before _apply_camera_effects sees the true pitch and roll.
-func _strip_camera_effects() -> void:
-	if _camera == null:
-		return
-	_camera.rotation.x -= _camera_fx_applied.x
-	_camera.rotation.z -= _camera_fx_applied.y
-	_camera_fx_applied = Vector2.ZERO
+	_update_camera_collision()
 
 
 # kb.java:138-151 (setupViewBobbing) + kb.java:119-135 (hurtCameraEffect),
@@ -1947,9 +1948,18 @@ func _apply_camera_effects(delta: float) -> void:
 		roll_offset += -r * cos(_attacked_at_yaw)
 	if _character_model != null and _character_model.has_method("set_hurt_tint"):
 		_character_model.call("set_hurt_tint", _hurt_time_sec > 0.0)
-	_camera.rotation.x += pitch_offset
-	_camera.rotation.z += roll_offset
-	_camera_fx_applied = Vector2(pitch_offset, roll_offset)
+	# Absolute write, not += on whatever the camera happens to hold. The
+	# look state lives in `_look_pitch`, so re-deriving the whole Euler here
+	# each frame keeps the effects from compounding into the view.
+	#
+	# The sum is clamped as well as `_look_pitch` itself: the airborne tilt
+	# runs to about +10° while falling, and added to a look pitch already
+	# parked at the 89° limit that lands the camera past vertical — the
+	# upside-down view this fix exists to remove, arriving through the
+	# effects path instead of the input path.
+	var limit: float = deg_to_rad(PITCH_LIMIT_DEG)
+	_camera.rotation.x = clampf(_camera_pitch() + pitch_offset, -limit, limit)
+	_camera.rotation.z = roll_offset
 
 
 # Right-stick camera look — polled per rendered frame (matching the
@@ -2186,6 +2196,19 @@ func _refresh_held_bow_texture(stage: int) -> void:
 			mat_tp.set_shader_parameter("item_texture", tex)
 
 
+# Where the third-person camera wants to sit, in player-local space, before
+# the wall clamp below. Vanilla orbits the eye down the look ray rather than
+# parking the camera at a fixed spot behind the head, which is what keeps the
+# player centred in frame as you pitch (issue #8 — "instead of looking around
+# the player, it just looks up like first person").
+func _third_person_camera_offset() -> Vector3:
+	# Player-local look vector: yaw lives on the body, pitch on `_look_pitch`.
+	var forward := Vector3(0.0, sin(_look_pitch), -cos(_look_pitch))
+	# Back mode walks backwards down the ray, front mode forwards along it.
+	var direction: float = -1.0 if perspective == PERSPECTIVE_THIRD_BACK else 1.0
+	return _CAM_FIRST_PERSON + forward * (direction * _CAM_THIRD_DISTANCE)
+
+
 # Vanilla MC camera collision: in third-person, raycast from the player's
 # eye to the desired camera position. If terrain is in the way, pull the
 # camera in to just before the obstruction. Without this, digging straight
@@ -2194,9 +2217,7 @@ func _refresh_held_bow_texture(stage: int) -> void:
 func _update_camera_collision() -> void:
 	if perspective == PERSPECTIVE_FIRST:
 		return
-	var desired_local: Vector3 = (
-		_CAM_THIRD_BACK if perspective == PERSPECTIVE_THIRD_BACK else _CAM_THIRD_FRONT
-	)
+	var desired_local: Vector3 = _third_person_camera_offset()
 	var eye_world: Vector3 = global_position + global_transform.basis * _CAM_FIRST_PERSON
 	var desired_world: Vector3 = global_position + global_transform.basis * desired_local
 	var query := PhysicsRayQueryParameters3D.create(eye_world, desired_world)
@@ -2224,14 +2245,17 @@ func _apply_perspective() -> void:
 	# player; mouse pitch is inverted in _apply_mouse_motion to compensate.
 	match perspective:
 		PERSPECTIVE_FIRST:
+			_camera.rotation.y = 0.0
 			_camera.position = _CAM_FIRST_PERSON
-			_camera.rotation.y = 0.0
 		PERSPECTIVE_THIRD_BACK:
-			_camera.position = _CAM_THIRD_BACK
 			_camera.rotation.y = 0.0
+			_camera.position = _third_person_camera_offset()
 		PERSPECTIVE_THIRD_FRONT:
-			_camera.position = _CAM_THIRD_FRONT
 			_camera.rotation.y = PI
+			_camera.position = _third_person_camera_offset()
+	# Front mode mirrors the camera's pitch relative to the player's, so the
+	# base pose has to be re-derived whenever the mode changes.
+	_write_camera_pitch()
 	var third: bool = perspective != PERSPECTIVE_FIRST
 	if _character_model != null:
 		# Hide the body model in first person (we'd be inside our own head)
@@ -3051,7 +3075,7 @@ func _respawn() -> void:
 	# only X/Z to zero.
 	_death_time_sec = 0.0
 	_hurt_time_sec = 0.0
-	_camera_fx_applied = Vector2.ZERO
+	_look_pitch = 0.0
 	if _camera != null:
 		_camera.rotation.x = 0.0
 		_camera.rotation.z = 0.0
@@ -3119,12 +3143,31 @@ func apply_look_delta(angles: Vector2) -> void:
 	if health <= 0 or is_sleeping:
 		return
 	rotate_y(-angles.x)
-	# Front-mode camera sits at Y=PI; without inverting pitch, mouse-down would
-	# tilt the view up. Flip the sign so up/down feels consistent across modes.
-	var pitch_sign: float = -1.0 if perspective == PERSPECTIVE_THIRD_FRONT else 1.0
-	_camera.rotate_x(pitch_sign * -angles.y)
+	# Clamp the SCALAR, then write the camera from it. The previous version
+	# rotated the camera first and clamped `_camera.rotation.x` afterwards,
+	# which cannot work: Godot's YXZ Euler decomposition folds anything past
+	# vertical back into +/-90° and flips y and z by 180° instead, so an
+	# overshoot read as a legal pitch and left the world upside down
+	# (issue #8). Nothing reads the camera's Euler back any more.
 	var pitch_limit: float = deg_to_rad(PITCH_LIMIT_DEG)
-	_camera.rotation.x = clamp(_camera.rotation.x, -pitch_limit, pitch_limit)
+	_look_pitch = clampf(_look_pitch - angles.y, -pitch_limit, pitch_limit)
+	_write_camera_pitch()
+
+
+# Camera-space pitch. Front mode parks the camera at yaw PI looking back at
+# the player, so its local X rotation runs opposite the player's real look
+# pitch; `_look_pitch` always means what the PLAYER is looking at.
+func _camera_pitch() -> float:
+	return -_look_pitch if perspective == PERSPECTIVE_THIRD_FRONT else _look_pitch
+
+
+# Push `_look_pitch` to the camera immediately, without waiting for the
+# next _apply_camera_effects. Effect offsets are re-applied that same frame,
+# so this only has to get the base pose right.
+func _write_camera_pitch() -> void:
+	if _camera == null:
+		return
+	_camera.rotation.x = _camera_pitch()
 
 
 # Vanilla EntityLiving.P() — full AABB overlap test against water blocks
@@ -3245,8 +3288,8 @@ func _begin_portal_travel() -> void:
 # preserves yaw but zeroes pitch, so the player is looking at the horizon
 # rather than at the ceiling they happened to be facing.
 func reset_pitch() -> void:
-	if _camera != null:
-		_camera.rotation.x = 0.0
+	_look_pitch = 0.0
+	_write_camera_pitch()
 
 
 # The HUD's portal overlay polls this each frame. Vanilla draws the

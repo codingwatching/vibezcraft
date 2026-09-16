@@ -144,12 +144,15 @@ static func _build_payload(player: Node3D) -> Dictionary:
 				slots_out[i] = [0, 0, 0]
 			else:
 				slots_out[i] = [stack.item_id, stack.count, stack.damage]
-	# Camera pitch lives on the player's "Camera3D" child (see player.gd's
-	# _apply_mouse_motion + the @onready _camera). Yaw is on the player
-	# Node3D itself (rotate_y in _apply_mouse_motion).
+	# Yaw is on the player Node3D itself (rotate_y in _apply_mouse_motion).
+	# Pitch comes from the player's `_look_pitch`, NOT off the camera: the
+	# camera's Euler carries the view-bob and hurt-flinch offsets on top of
+	# the look pose, so saving mid-fall would bank the airborne tilt too.
 	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
 	var yaw: float = player.rotation.y
 	var pitch: float = camera.rotation.x if camera != null else 0.0
+	if "_look_pitch" in player:
+		pitch = float(player.get("_look_pitch"))
 	# Bed-respawn point — vanilla `EntityPlayer.spawnX/Y/Z + spawnSet`.
 	# Optional fields; default to no-bed-spawn on first save and on
 	# loads from older format-version-1 files (Dictionary.get with a
@@ -299,9 +302,15 @@ static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
 	else:
 		player.global_position = saved_pos
 	player.rotation.y = float(payload.get("yaw", 0.0))
+	var saved_pitch: float = float(payload.get("pitch", 0.0))
 	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
 	if camera != null:
-		camera.rotation.x = float(payload.get("pitch", 0.0))
+		camera.rotation.x = saved_pitch
+	# `_look_pitch` is the player's source of truth and the camera's Euler
+	# is rewritten from it every frame, so restoring only the camera would
+	# have the view snap back to level on the first _process after a load.
+	if "_look_pitch" in player:
+		player.set("_look_pitch", saved_pitch)
 	if "health" in player:
 		player.set("health", int(payload.get("health", 20)))
 	# Bed-respawn restore — defaults preserve the no-bed-spawn state for
